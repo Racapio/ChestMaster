@@ -57,8 +57,8 @@ Default target (from `gradle.properties`, currently `1.21.11`):
 Build for a specific Minecraft version:
 
 ```powershell
-./gradlew.bat build -Pminecraft_version=1.21.10 -Pfabric_version=0.138.0+1.21.10 -Pkotlin_loader_version=1.13.8+kotlin.2.3.0 -Pmod_version=1.0.3+mc1.21.10
-./gradlew.bat build -Pminecraft_version=1.21.11 -Pfabric_version=0.141.3+1.21.11 -Pkotlin_loader_version=1.13.9+kotlin.2.3.10 -Pmod_version=1.0.3+mc1.21.11
+./gradlew.bat build -Pminecraft_version=1.21.10 -Pfabric_version=0.138.0+1.21.10 -Pkotlin_loader_version=1.13.8+kotlin.2.3.0 -Pmod_version=1.0.0+mc1.21.10
+./gradlew.bat build -Pminecraft_version=1.21.11 -Pfabric_version=0.141.3+1.21.11 -Pkotlin_loader_version=1.13.9+kotlin.2.3.10 -Pmod_version=1.0.0+mc1.21.11
 ```
 
 Build both versions in one command:
