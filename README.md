@@ -1,5 +1,7 @@
 # ChestMaster
 
+This is the first release of this mod that was written using AI (or rather, completely using it). I've fully tested it and I like it. If you find any mistakes, write to me on Discord: **Racap**.
+
 Client-side Fabric mod for Hypixel SkyBlock:
 - scans chest contents into a local SQLite database,
 - lets you search saved items quickly,
