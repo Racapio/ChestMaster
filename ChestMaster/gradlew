@@ -1,0 +1,70 @@
+#!/usr/bin/env sh
+set -eu
+
+# Lightweight wrapper: downloads the Gradle distribution declared in gradle/wrapper/gradle-wrapper.properties
+# and runs it. (This project archive didn't include the standard gradle-wrapper.jar.)
+
+APP_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+PROPS_FILE="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
+if [ ! -f "$PROPS_FILE" ]; then
+  echo "Missing $PROPS_FILE" >&2
+  exit 1
+fi
+
+DIST_URL=$(grep -E '^distributionUrl=' "$PROPS_FILE" | sed 's/^distributionUrl=//')
+if [ -z "$DIST_URL" ]; then
+  echo "distributionUrl not found in $PROPS_FILE" >&2
+  exit 1
+fi
+
+GRADLE_USER_HOME="${GRADLE_USER_HOME:-$HOME/.gradle}"
+DIST_DIR="$GRADLE_USER_HOME/wrapper/dists"
+mkdir -p "$DIST_DIR"
+
+ZIP_NAME=$(basename "$DIST_URL")
+BASE_NAME="${ZIP_NAME%.zip}"
+# Use a stable folder name to avoid multiple downloads
+TARGET_DIR="$DIST_DIR/$BASE_NAME"
+GRADLE_HOME=""
+
+if [ -d "$TARGET_DIR" ]; then
+  # pick first gradle-* folder inside
+  GRADLE_HOME=$(find "$TARGET_DIR" -maxdepth 2 -type d -name "gradle-*" | head -n 1 || true)
+fi
+
+if [ -z "$GRADLE_HOME" ] || [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
+  echo "Downloading Gradle distribution: $DIST_URL"
+  TMP_ZIP="$TARGET_DIR/$ZIP_NAME"
+  mkdir -p "$TARGET_DIR"
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail -o "$TMP_ZIP" "$DIST_URL"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$TMP_ZIP" "$DIST_URL"
+  else
+    echo "Neither curl nor wget is available to download Gradle." >&2
+    exit 1
+  fi
+
+  echo "Extracting Gradle..."
+  # Try unzip first, then jar
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q -o "$TMP_ZIP" -d "$TARGET_DIR"
+  else
+    # 'jar' is usually available with JDK
+    jar xf "$TMP_ZIP"
+    # if jar extracted into cwd, move
+    if [ -d "gradle-*" ]; then
+      mv gradle-* "$TARGET_DIR/" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$TMP_ZIP"
+  GRADLE_HOME=$(find "$TARGET_DIR" -maxdepth 2 -type d -name "gradle-*" | head -n 1 || true)
+fi
+
+if [ -z "$GRADLE_HOME" ] || [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
+  echo "Failed to prepare Gradle distribution." >&2
+  exit 1
+fi
+
+exec "$GRADLE_HOME/bin/gradle" "$@"

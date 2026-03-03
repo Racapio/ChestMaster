@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/ChestMaster.client.iml" filepath="$PROJECT_DIR$/.idea/modules/ChestMaster.client.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/ChestMaster.main.iml" filepath="$PROJECT_DIR$/.idea/modules/ChestMaster.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/ChestMaster.test.iml" filepath="$PROJECT_DIR$/.idea/modules/ChestMaster.test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/ChestMaster_fixed.iml" filepath="$PROJECT_DIR$/.idea/ChestMaster_fixed.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/com.chestmaster.ChestMaster.client.iml" filepath="$PROJECT_DIR$/.idea/modules/com.chestmaster.ChestMaster.client.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/com.chestmaster.ChestMaster.main.iml" filepath="$PROJECT_DIR$/.idea/modules/com.chestmaster.ChestMaster.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/com.chestmaster.ChestMaster.test.iml" filepath="$PROJECT_DIR$/.idea/modules/com.chestmaster.ChestMaster.test.iml" />
+    </modules>
+  </component>
+</project>

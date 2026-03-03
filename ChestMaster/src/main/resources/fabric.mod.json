@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "chestmaster",
+  "version": "${version}",
+  "name": "ChestMaster",
+  "description": "Client-side chest indexing and item valuation for SkyBlock (no automation).",
+  "authors": ["Manus"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "main": [
+      "com.chestmaster.ChestMasterMod"
+    ],
+    "client": [
+      "com.client.chestmasterClient"
+    ]
+  },
+  "mixins": [
+    "chestmaster.mixins.json",
+    {
+      "config": "chestmaster.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-language-kotlin": ">=${kotlin_loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
