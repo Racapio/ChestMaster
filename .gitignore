@@ -1,0 +1,6 @@
+﻿**/.gradle/
+**/.gradle-user/
+**/.kotlin/
+**/build/
+**/run/
+**/.idea/
