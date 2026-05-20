@@ -1,32 +1,50 @@
 package com.chestmaster.highlight
 
 import com.chestmaster.ChestMasterMod
+import com.chestmaster.compat.VersionHelper
+import com.chestmaster.util.WorldUtils
+import com.mojang.blaze3d.vertex.PoseStack
+import com.mojang.blaze3d.vertex.VertexConsumer
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents
 import net.minecraft.client.Minecraft
 import net.minecraft.core.BlockPos
-import java.util.Locale
 
 object ChestLocationHighlighter {
-    private const val REFRESH_INTERVAL_MS = 2000L
-
     @Volatile
     private var activePositions: List<BlockPos> = emptyList()
 
     @Volatile
-    private var lastRefreshMs: Long = 0
-
-    @Volatile
     private var lastWorldContextKey: String? = null
+
+    fun init() {
+        WorldRenderEvents.AFTER_ENTITIES.register { context ->
+            val positions = activePositions
+            if (positions.isEmpty()) return@register
+
+            val cameraPos = context.gameRenderer().getMainCamera().position()
+            val matrices = context.matrices()
+            val buffer = VersionHelper.getLinesBuffer(context.consumers())
+
+            matrices.pushPose()
+            matrices.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z)
+
+            for (pos in positions) {
+                renderBox(
+                    matrices, buffer,
+                    pos.x.toFloat(), pos.y.toFloat(), pos.z.toFloat(),
+                    (pos.x + 1).toFloat(), (pos.y + 1).toFloat(), (pos.z + 1).toFloat(),
+                    0.0f, 1.0f, 0.35f, 0.9f
+                )
+            }
+
+            matrices.popPose()
+        }
+    }
 
     fun getActiveMarkerCount(): Int = activePositions.size
 
     fun clear() {
         activePositions = emptyList()
-        val client = Minecraft.getInstance()
-        runCatching {
-            client.levelRenderer.gameTestBlockHighlightRenderer.clear()
-        }.onFailure {
-            ChestMasterMod.LOGGER.debug("Failed to clear chest markers: ${it.message}")
-        }
     }
 
     fun onClientTick(client: Minecraft) {
@@ -45,19 +63,6 @@ object ChestLocationHighlighter {
             }
             lastWorldContextKey = contextKey
         }
-
-        val positions = activePositions
-        if (positions.isEmpty()) return
-
-        val now = System.currentTimeMillis()
-        if (now - lastRefreshMs < REFRESH_INTERVAL_MS) return
-
-        runCatching {
-            renderMarkers(client, positions)
-            lastRefreshMs = now
-        }.onFailure {
-            ChestMasterMod.LOGGER.debug("Failed to refresh chest markers: ${it.message}")
-        }
     }
 
     fun highlight(itemName: String, positions: List<BlockPos>): Int {
@@ -68,41 +73,59 @@ object ChestLocationHighlighter {
 
         val unique = positions.distinct()
         activePositions = unique
-        val client = Minecraft.getInstance()
 
-        return runCatching {
-            if (ChestMasterMod.isVerboseLogging()) {
-                ChestMasterMod.LOGGER.debug("Highlighting ${unique.size} chest marker(s) for $itemName")
-            }
-            renderMarkers(client, unique)
-            lastRefreshMs = System.currentTimeMillis()
-            unique.size
-        }.getOrElse {
-            if (ChestMasterMod.isVerboseLogging()) {
-                ChestMasterMod.LOGGER.debug("Failed to show chest markers: ${it.message}")
-            }
-            0
+        if (ChestMasterMod.isVerboseLogging()) {
+            ChestMasterMod.LOGGER.debug("Highlighting ${unique.size} chest marker(s) for $itemName")
         }
+
+        return unique.size
     }
 
-    private fun renderMarkers(client: Minecraft, positions: List<BlockPos>) {
-        val markerRenderer = client.levelRenderer.gameTestBlockHighlightRenderer
-        markerRenderer.clear()
-        positions.forEach { pos ->
-            // Vanilla block highlight renderer stores markers for a short time.
-            // We periodically refresh them instead of adding custom render mixins.
-            markerRenderer.highlightPos(pos, pos)
-        }
+    private fun renderBox(
+        matrices: PoseStack,
+        buffer: VertexConsumer,
+        x1: Float, y1: Float, z1: Float,
+        x2: Float, y2: Float, z2: Float,
+        r: Float, g: Float, b: Float, a: Float
+    ) {
+        // Bottom face edges
+        line(matrices, buffer, x1, y1, z1, x2, y1, z1, r, g, b, a)
+        line(matrices, buffer, x2, y1, z1, x2, y1, z2, r, g, b, a)
+        line(matrices, buffer, x2, y1, z2, x1, y1, z2, r, g, b, a)
+        line(matrices, buffer, x1, y1, z2, x1, y1, z1, r, g, b, a)
+        // Top face edges
+        line(matrices, buffer, x1, y2, z1, x2, y2, z1, r, g, b, a)
+        line(matrices, buffer, x2, y2, z1, x2, y2, z2, r, g, b, a)
+        line(matrices, buffer, x2, y2, z2, x1, y2, z2, r, g, b, a)
+        line(matrices, buffer, x1, y2, z2, x1, y2, z1, r, g, b, a)
+        // Vertical edges
+        line(matrices, buffer, x1, y1, z1, x1, y2, z1, r, g, b, a)
+        line(matrices, buffer, x2, y1, z1, x2, y2, z1, r, g, b, a)
+        line(matrices, buffer, x2, y1, z2, x2, y2, z2, r, g, b, a)
+        line(matrices, buffer, x1, y1, z2, x1, y2, z2, r, g, b, a)
+    }
+
+    private fun line(
+        matrices: PoseStack,
+        buffer: VertexConsumer,
+        x1: Float, y1: Float, z1: Float,
+        x2: Float, y2: Float, z2: Float,
+        r: Float, g: Float, b: Float, a: Float
+    ) {
+        val pose = matrices.last()
+        val ri = (r * 255).toInt()
+        val gi = (g * 255).toInt()
+        val bi = (b * 255).toInt()
+        val ai = (a * 255).toInt()
+        val dx = x2 - x1
+        val dy = y2 - y1
+        val dz = z2 - z1
+        buffer.addVertex(pose, x1, y1, z1).setColor(ri, gi, bi, ai).setNormal(pose, dx, dy, dz)
+        buffer.addVertex(pose, x2, y2, z2).setColor(ri, gi, bi, ai).setNormal(pose, dx, dy, dz)
     }
 
     private fun getWorldContextKey(client: Minecraft): String {
-        val serverData = client.currentServer
-        val serverKey = when {
-            client.isLocalServer -> "singleplayer"
-            serverData != null -> "remote:${serverData.ip.lowercase(Locale.ROOT)}"
-            else -> "menu"
-        }
-
+        val serverKey = WorldUtils.getCurrentServerKey()
         val level = client.level
         val levelKey = if (level == null) {
             "level:none"
@@ -110,7 +133,6 @@ object ChestLocationHighlighter {
             val dimension = level.dimension().toString()
             "level:$dimension@${System.identityHashCode(level)}"
         }
-
         return "$serverKey|$levelKey"
     }
 }
