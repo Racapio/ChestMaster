@@ -44,6 +44,9 @@ class DatabaseManager {
 
             dbPath = targetPath
             connection = DriverManager.getConnection("jdbc:sqlite:$targetPath")
+            // WAL mode: allows concurrent reads while a write is in progress,
+            // preventing the render thread from blocking on DB saves.
+            connection?.createStatement()?.use { it.execute("PRAGMA journal_mode=WAL") }
             createTables()
             migrateSchema()
             if (ChestMasterMod.isVerboseLogging()) {
@@ -66,7 +69,9 @@ class DatabaseManager {
                 chestX INTEGER,
                 chestY INTEGER,
                 chestZ INTEGER,
-                label TEXT
+                label TEXT,
+                serverKey TEXT DEFAULT '',
+                lastSeen INTEGER DEFAULT 0
             )
         """.trimIndent()
         connection?.createStatement()?.use { it.execute(sql) }
@@ -74,10 +79,15 @@ class DatabaseManager {
         connection?.createStatement()?.use { stmt ->
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_items_chest_pos ON items(chestX, chestY, chestZ)")
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_items_identity ON items(itemId, baseItemId)")
+            // idx_items_server is created in migrateSchema() after serverKey is guaranteed to exist.
+            // Creating it here would crash on pre-1.1.0 databases that still lack that column.
         }
     }
 
     private fun migrateSchema() {
+        // Read the existing columns once, then check each required column against the set.
+        val existingColumns = readExistingColumns("items")
+
         val requiredColumns = listOf(
             "itemId" to "TEXT DEFAULT ''",
             "baseItemId" to "TEXT DEFAULT ''",
@@ -87,34 +97,43 @@ class DatabaseManager {
             "chestX" to "INTEGER DEFAULT 0",
             "chestY" to "INTEGER DEFAULT 0",
             "chestZ" to "INTEGER DEFAULT 0",
-            "label" to "TEXT DEFAULT ''"
+            "label" to "TEXT DEFAULT ''",
+            "serverKey" to "TEXT DEFAULT ''",
+            "lastSeen" to "INTEGER DEFAULT 0"
         )
 
         for ((column, definition) in requiredColumns) {
-            ensureColumn("items", column, definition)
-        }
-
-        backfillLegacyRows()
-    }
-
-    private fun ensureColumn(table: String, column: String, definition: String) {
-        val existingColumns = mutableSetOf<String>()
-        connection?.createStatement()?.use { stmt ->
-            stmt.executeQuery("PRAGMA table_info($table)").use { rs ->
-                while (rs.next()) {
-                    existingColumns.add(rs.getString("name"))
+            if (!existingColumns.contains(column)) {
+                connection?.createStatement()?.use { stmt ->
+                    stmt.execute("ALTER TABLE items ADD COLUMN $column $definition")
+                }
+                if (ChestMasterMod.isVerboseLogging()) {
+                    ChestMasterMod.LOGGER.info("Database schema updated: added $column to items")
                 }
             }
         }
 
-        if (!existingColumns.contains(column)) {
-            connection?.createStatement()?.use { stmt ->
-                stmt.execute("ALTER TABLE $table ADD COLUMN $column $definition")
-            }
-            if (ChestMasterMod.isVerboseLogging()) {
-                ChestMasterMod.LOGGER.info("Database schema updated: added $column to $table")
+        backfillLegacyRows()
+
+        // Create the serverKey index here — after the column is guaranteed to exist (either it was
+        // always present in a fresh schema, or it was just added above via ALTER TABLE).
+        // This must NOT live in createTables() because that runs before the column is added for
+        // pre-1.1.0 databases, causing "no such column: serverKey" and breaking all subsequent saves.
+        connection?.createStatement()?.use { stmt ->
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_items_server ON items(serverKey)")
+        }
+    }
+
+    private fun readExistingColumns(table: String): Set<String> {
+        val columns = mutableSetOf<String>()
+        connection?.createStatement()?.use { stmt ->
+            stmt.executeQuery("PRAGMA table_info($table)").use { rs ->
+                while (rs.next()) {
+                    columns.add(rs.getString("name"))
+                }
             }
         }
+        return columns
     }
 
     private fun backfillLegacyRows() {
@@ -125,7 +144,9 @@ class DatabaseManager {
                 displayName = COALESCE(NULLIF(displayName, ''), NULLIF(baseItemId, ''), NULLIF(itemId, ''), 'Unknown Item'),
                 baseItemId = COALESCE(baseItemId, ''),
                 itemNbt = COALESCE(itemNbt, ''),
-                label = COALESCE(label, '')
+                label = COALESCE(label, ''),
+                serverKey = COALESCE(serverKey, ''),
+                lastSeen = COALESCE(lastSeen, 0)
         """.trimIndent()
 
         connection?.createStatement()?.use { it.executeUpdate(sql) }
@@ -137,8 +158,13 @@ class DatabaseManager {
         val conn = connection ?: return
 
         val groupedByChest = items.groupBy { Triple(it.chestX, it.chestY, it.chestZ) }
-        val deleteSql = "DELETE FROM items WHERE chestX = ? AND chestY = ? AND chestZ = ?"
-        val insertSql = "INSERT INTO items (itemId, baseItemId, displayName, itemNbt, count, chestX, chestY, chestZ, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        // Delete only rows belonging to the same server so multi-server data stays separate.
+        val deleteSql = "DELETE FROM items WHERE chestX = ? AND chestY = ? AND chestZ = ? AND serverKey = ?"
+        val insertSql = """
+            INSERT INTO items
+              (itemId, baseItemId, displayName, itemNbt, count, chestX, chestY, chestZ, label, serverKey, lastSeen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """.trimIndent()
 
         val previousAutoCommit = conn.autoCommit
         conn.autoCommit = false
@@ -146,9 +172,11 @@ class DatabaseManager {
             conn.prepareStatement(deleteSql).use { deleteStmt ->
                 conn.prepareStatement(insertSql).use { insertStmt ->
                     for ((coords, chestItems) in groupedByChest) {
+                        val serverKey = chestItems.first().serverKey
                         deleteStmt.setInt(1, coords.first)
                         deleteStmt.setInt(2, coords.second)
                         deleteStmt.setInt(3, coords.third)
+                        deleteStmt.setString(4, serverKey)
                         deleteStmt.executeUpdate()
 
                         for (item in chestItems) {
@@ -161,6 +189,8 @@ class DatabaseManager {
                             insertStmt.setInt(7, item.chestY)
                             insertStmt.setInt(8, item.chestZ)
                             insertStmt.setString(9, item.label)
+                            insertStmt.setString(10, item.serverKey)
+                            insertStmt.setLong(11, item.lastSeen)
                             insertStmt.addBatch()
                         }
                     }
@@ -177,29 +207,42 @@ class DatabaseManager {
     }
 
     @Synchronized
-    fun searchItems(query: String): List<ItemRecord> {
+    fun searchItems(query: String, serverKey: String? = null): List<ItemRecord> {
         val results = mutableListOf<ItemRecord>()
-        val sql = "SELECT * FROM items WHERE displayName LIKE ? OR itemId LIKE ? OR baseItemId LIKE ? OR label LIKE ?"
+        val serverFilter = if (!serverKey.isNullOrBlank()) "AND (serverKey = ? OR serverKey = '')" else ""
+        val sql = """
+            SELECT * FROM items
+            WHERE (displayName LIKE ? OR itemId LIKE ? OR baseItemId LIKE ? OR label LIKE ?)
+            $serverFilter
+            ORDER BY displayName
+            LIMIT 2000
+        """.trimIndent()
+
         connection?.prepareStatement(sql)?.use { pstmt ->
             val q = "%$query%"
             pstmt.setString(1, q)
             pstmt.setString(2, q)
             pstmt.setString(3, q)
             pstmt.setString(4, q)
+            if (!serverKey.isNullOrBlank()) pstmt.setString(5, serverKey)
             pstmt.executeQuery().use { rs ->
                 while (rs.next()) {
-                    results.add(ItemRecord(
-                        id = rs.getInt("id"),
-                        itemId = rs.getString("itemId"),
-                        baseItemId = rs.getString("baseItemId") ?: "",
-                        displayName = rs.getString("displayName"),
-                        itemNbt = rs.getString("itemNbt"),
-                        count = rs.getInt("count"),
-                        chestX = rs.getInt("chestX"),
-                        chestY = rs.getInt("chestY"),
-                        chestZ = rs.getInt("chestZ"),
-                        label = rs.getString("label")
-                    ))
+                    results.add(
+                        ItemRecord(
+                            id = rs.getInt("id"),
+                            itemId = rs.getString("itemId"),
+                            baseItemId = rs.getString("baseItemId") ?: "",
+                            displayName = rs.getString("displayName"),
+                            itemNbt = rs.getString("itemNbt"),
+                            count = rs.getInt("count"),
+                            chestX = rs.getInt("chestX"),
+                            chestY = rs.getInt("chestY"),
+                            chestZ = rs.getInt("chestZ"),
+                            label = rs.getString("label"),
+                            serverKey = rs.getString("serverKey") ?: "",
+                            lastSeen = rs.getLong("lastSeen")
+                        )
+                    )
                 }
             }
         }
@@ -256,7 +299,8 @@ class DatabaseManager {
         itemId: String,
         baseItemId: String,
         itemNbt: String,
-        displayName: String = ""
+        displayName: String = "",
+        serverKey: String? = null
     ): List<ChestLocation> {
         val results = linkedSetOf<ChestLocation>()
         val normalizedItemId = ItemUtils.normalizeSkyblockId(itemId) ?: itemId
@@ -275,10 +319,12 @@ class DatabaseManager {
         )
         val targetKey = buildStackingKey(targetRecord)
 
+        val serverFilter = if (!serverKey.isNullOrBlank()) "AND (serverKey = ? OR serverKey = '')" else ""
         val sql = """
-            SELECT itemId, baseItemId, displayName, itemNbt, count, chestX, chestY, chestZ, label
+            SELECT itemId, baseItemId, displayName, itemNbt, count, chestX, chestY, chestZ, label, serverKey
             FROM items
-            WHERE itemId = ? OR baseItemId = ? OR itemId = ? OR baseItemId = ?
+            WHERE (itemId = ? OR baseItemId = ? OR itemId = ? OR baseItemId = ?)
+            $serverFilter
         """.trimIndent()
 
         connection?.prepareStatement(sql)?.use { pstmt ->
@@ -286,6 +332,7 @@ class DatabaseManager {
             pstmt.setString(2, normalizedItemId)
             pstmt.setString(3, normalizedBaseItemId)
             pstmt.setString(4, normalizedBaseItemId)
+            if (!serverKey.isNullOrBlank()) pstmt.setString(5, serverKey)
             pstmt.executeQuery().use { rs ->
                 while (rs.next()) {
                     val rowRecord = ItemRecord(
@@ -298,7 +345,8 @@ class DatabaseManager {
                         chestX = rs.getInt("chestX"),
                         chestY = rs.getInt("chestY"),
                         chestZ = rs.getInt("chestZ"),
-                        label = rs.getString("label") ?: ""
+                        label = rs.getString("label") ?: "",
+                        serverKey = rs.getString("serverKey") ?: ""
                     )
 
                     if (buildStackingKey(rowRecord) != targetKey) continue
@@ -310,12 +358,32 @@ class DatabaseManager {
                     // Ignore legacy rows saved before chest position detection existed.
                     if (x == 0 && y == 0 && z == 0) continue
 
-                    results.add(ChestLocation(x, y, z, rowRecord.label))
+                    results.add(ChestLocation(x, y, z, rowRecord.label, rowRecord.serverKey))
                 }
             }
         }
 
         return results.toList()
+    }
+
+    fun exportToCsv(path: Path, serverKey: String? = null) {
+        val items = searchItems("", serverKey)
+        Files.newBufferedWriter(path).use { writer ->
+            writer.write("Name,Item ID,Count,Chest X,Chest Y,Chest Z,Label,Server,Last Seen\n")
+            for (item in items) {
+                val lastSeenStr = if (item.lastSeen > 0L) item.lastSeen.toString() else ""
+                writer.write(
+                    "${csvEscape(item.displayName)},${csvEscape(item.itemId)},${item.count}," +
+                        "${item.chestX},${item.chestY},${item.chestZ}," +
+                        "${csvEscape(item.label)},${csvEscape(item.serverKey)},$lastSeenStr\n"
+                )
+            }
+        }
+    }
+
+    private fun csvEscape(value: String): String {
+        if (!value.contains(',') && !value.contains('"') && !value.contains('\n')) return value
+        return "\"${value.replace("\"", "\"\"")}\""
     }
 
     private fun stackSimilarItems(records: List<ItemRecord>): List<ItemRecord> {
@@ -328,7 +396,10 @@ class DatabaseManager {
             if (existing == null) {
                 aggregated[key] = record
             } else {
-                aggregated[key] = existing.copy(count = existing.count + record.count)
+                aggregated[key] = existing.copy(
+                    count = existing.count + record.count,
+                    lastSeen = maxOf(existing.lastSeen, record.lastSeen)
+                )
             }
         }
 
