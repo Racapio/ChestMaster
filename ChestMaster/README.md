@@ -1,78 +1,90 @@
-# ChestMaster (Fabric, 1.21.10 / 1.21.11)
+# ChestMaster
 
-Client-side SkyBlock helper for indexing chest contents, searching saved items, and estimating value.
+Client-side Fabric mod for Hypixel SkyBlock written entirely with AI assistance — fully tested and working. If you find any bugs, reach out on Discord: **Racap**.
 
-## Features
+- Scans chest contents into a local SQLite database
+- Lets you search saved items quickly
+- Estimates item value (Bazaar / Auction House / NPC)
+- Highlights chest locations for selected items in the world
 
-- Auto-scan real chest containers into local SQLite DB.
-- Search and aggregate saved items.
-- Value estimation from Bazaar/Auction/NPC data.
-- Filter view by source: `All`, `Bazaar`, `Auction`.
-- Highlight saved chest locations for selected items.
-- DB reset with real file compaction (`VACUUM`).
+The mod is read-only QoL: no automation, no movement/combat macros, no packet spoofing.
+
+## Supported versions
+
+| Minecraft | Loader |
+|---|---|
+| `1.21.10` | Fabric |
+| `1.21.11` | Fabric |
+| `26.1` | Fabric |
+| `26.1.2` | Fabric (requires Java 25) |
+
+## Installation
+
+1. Download the JAR for your Minecraft version from [GitHub Releases](../../releases).
+2. Place it in your instance `mods` folder.
+3. Remove any old `chestmaster*.jar` before updating.
+4. Launch the game.
+
+| Instance | JAR to use |
+|---|---|
+| `1.21.10` | `...+mc1.21.10.jar` |
+| `1.21.11` | `...+mc1.21.11.jar` |
+| `26.1` / `26.1.2` | `...+mc26.1.2.jar` |
 
 ## Commands
 
-- `/cm` or `/chestmaster`: open GUI.
-- `/cm s on|off|status|now`: auto-scan control.
-- `/cm db`: show DB path.
-- `/cm reset confirm`: clear DB and compact file.
-- `/cm p status|reload`: price cache status/reload.
-- `/cm m clear`: clear highlighted markers.
-- `/cm logs on|off|status`: toggle verbose ChestMaster logs.
+```
+/cm                     — open the ChestMaster GUI
+/cm search <item>       — search for an item across all scanned chests
+/cm on / /cm off        — enable / disable auto-scan
+/cm export              — export current server data to CSV
+/cm export all          — export all servers data to CSV
+/cm m clear             — clear active chest highlight markers
+/cm logs on|off|status  — toggle verbose logging
+```
 
-## Logging
+## Features
 
-Default logging is intentionally quiet for release use.
-
-- Frequent scan and pricing logs are disabled by default.
-- Enable verbose logs:
-  `/cm logs on`
-  or `config/chestmaster.json` -> `"verboseLogging": true`
+- Auto-scan of opened chest containers
+- Local SQLite database — data persists between sessions
+- Per-server item tracking — no cross-server data mixing
+- Fast search with item stacking and aggregation
+- Market price sources: Bazaar, Auction House lowest-bin, NPC
+- "Last seen" timestamps for each scanned chest
+- CSV export of scanned data
+- Sort results by price, name, or count — saved between sessions
+- Filter by price source: All / Bazaar / Auction / Unknown
+- Rarity-colored item names in the GUI
+- Auto-Scan toggle button directly in the GUI
+- Chest highlights auto-clear on world/server change
+- Settings persist across game restarts
 
 ## Safety and Hypixel
 
-ChestMaster is designed as a **read-only QoL** mod:
+ChestMaster is a **read-only QoL** mod — it only reads client-visible container data and stores it locally:
 
-- no movement automation
-- no combat automation
+- no movement or combat automation
 - no macro behavior
 - no packet spoofing or bypass logic
 
-It only reads client-visible container data and stores it locally.
+This is not an official legal guarantee. Always follow the latest Hypixel policies.
 
-Important: this is not an official legal/rule guarantee. Final responsibility is on the player account owner. Always follow the latest Hypixel policies and allowed-mod guidance.
+- [Hypixel Server Rules](https://support.hypixel.net/hc/en-us/articles/4427624493330-Hypixel-Server-Rules)
+- [Hypixel Allowed Modifications](https://support.hypixel.net/hc/en-us/articles/6472550754962-Hypixel-Allowed-Modifications)
 
-- Hypixel Rules: https://support.hypixel.net/hc/en-us/articles/4427624493330-Hypixel-Server-Rules
-- Hypixel Allowed Modifications: https://support.hypixel.net/hc/en-us/articles/6472550754962-Hypixel-Allowed-Modifications
-
-## Build
-
-Default target (from `gradle.properties`, currently `1.21.11`):
-
-```powershell
-./gradlew.bat build
-```
+## Build from source
 
 Build for a specific Minecraft version:
 
 ```powershell
-./gradlew.bat build -Pminecraft_version=1.21.10 -Pfabric_version=0.138.0+1.21.10 -Pkotlin_loader_version=1.13.8+kotlin.2.3.0 -Pmod_version=1.0.0+mc1.21.10
-./gradlew.bat build -Pminecraft_version=1.21.11 -Pfabric_version=0.141.3+1.21.11 -Pkotlin_loader_version=1.13.9+kotlin.2.3.10 -Pmod_version=1.0.0+mc1.21.11
+./gradlew.bat build -PmcVersion=1.21.10
+./gradlew.bat build -PmcVersion=1.21.11
+./gradlew.bat build -PmcVersion=26.1
+./gradlew.bat build -PmcVersion=26.1.2
 ```
 
-Build both versions in one command:
+Build outputs go to `build/libs/`.
 
-```powershell
-./scripts/build-multi-version.ps1
-```
+## License
 
-Output jars will be copied to:
-
-`dist/multi-version`
-
-Important for MultiMC/Prism:
-- Use the exact jar for your instance version from `dist/multi-version`.
-- Remove old `chestmaster*.jar` files from `mods` before copying a new one.
-- `1.21.10` instance must use `chestmaster-...+mc1.21.10.jar`.
-- `1.21.11` instance must use `chestmaster-...+mc1.21.11.jar`.
+MIT (see `LICENSE.txt`).
