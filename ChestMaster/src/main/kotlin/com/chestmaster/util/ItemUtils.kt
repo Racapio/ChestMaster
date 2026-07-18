@@ -145,6 +145,89 @@ val ItemStack.transmissionTunerCount: Int
 object ItemUtils {
     private val itemLookupCache = ConcurrentHashMap<String, Item>()
 
+    // SkyBlock pet tier order used by market APIs ("TYPE;TIER_INDEX" keys).
+    private val petTierNames = listOf("COMMON", "UNCOMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC")
+
+    /**
+     * Builds the market key for a pet ("ENDERMAN;4") from its petInfo JSON,
+     * or null when the item is not a pet / petInfo is malformed.
+     */
+    fun extractPetKey(extraAttributes: CompoundTag?): String? {
+        if (extraAttributes == null) return null
+        val petInfo = extraAttributes.getString("petInfo").orElse(null)
+        if (petInfo.isNullOrBlank()) return null
+        return try {
+            val obj = com.google.gson.JsonParser.parseString(petInfo).asJsonObject
+            val type = obj.get("type")?.asString?.trim()?.uppercase(Locale.ROOT)
+            val tier = obj.get("tier")?.asString?.trim()?.uppercase(Locale.ROOT)
+            if (type.isNullOrBlank() || tier.isNullOrBlank()) return null
+            val tierIndex = petTierNames.indexOf(tier)
+            if (tierIndex < 0) return null
+            "$type;$tierIndex"
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Reverse of the tier index in a pet key: "ENDERMAN;4" -> "LEGENDARY". */
+    fun petTierNameFromKey(petKey: String): String? {
+        val index = petKey.substringAfterLast(';', "").toIntOrNull() ?: return null
+        return petTierNames.getOrNull(index)
+    }
+
+    private val formattingCodeRegex = Regex("§.")
+    private val countSuffixRegex = Regex("(?i)\\s*x\\d+$")
+
+    /**
+     * Extracts the plain display name from the serialized "minecraft:custom_name"
+     * component of a stored NBT payload, or null when absent.
+     */
+    fun extractDisplayNameFromNbtString(nbtString: String): String? {
+        if (nbtString.isBlank() || nbtString == "{}") return null
+        val nbt = parseNbtSafely(nbtString) ?: return null
+        val nameTag = nbt.get("minecraft:custom_name") ?: return null
+        val sb = StringBuilder()
+        appendComponentText(nameTag, sb)
+        val cleaned = formattingCodeRegex.replace(sb.toString(), "").trim()
+        return cleaned.takeIf { it.isNotBlank() }
+    }
+
+    private fun appendComponentText(tag: net.minecraft.nbt.Tag, sb: StringBuilder) {
+        when (tag) {
+            is CompoundTag -> {
+                tag.getString("text").orElse(null)?.let { sb.append(it) }
+                (tag.get("extra") as? net.minecraft.nbt.ListTag)?.let { appendComponentText(it, sb) }
+            }
+            is net.minecraft.nbt.ListTag -> {
+                for (i in 0 until tag.size) {
+                    tag.get(i)?.let { appendComponentText(it, sb) }
+                }
+            }
+            else -> tag.asString().orElse(null)?.let { sb.append(it) }
+        }
+    }
+
+    /**
+     * Attribute shards carry the generic id "ATTRIBUTE_SHARD"; the market key is derived
+     * from the display name: "Night Squid Shard" -> "SHARD_NIGHT_SQUID" (a Bazaar product).
+     */
+    fun shardMarketKeyFromDisplayName(rawName: String?): String? {
+        if (rawName.isNullOrBlank()) return null
+        val cleaned = countSuffixRegex.replace(formattingCodeRegex.replace(rawName, "").trim(), "").trim()
+        if (!cleaned.endsWith(" Shard", ignoreCase = true)) return null
+        val base = cleaned.dropLast(6).trim()
+        if (base.isBlank()) return null
+        val key = base.uppercase(Locale.ROOT)
+            .replace(Regex("[^A-Z0-9]+"), "_")
+            .trim('_')
+        if (key.isBlank()) return null
+        return "SHARD_$key"
+    }
+
+    fun shardMarketKeyFromNbt(nbtString: String): String? {
+        return shardMarketKeyFromDisplayName(extractDisplayNameFromNbtString(nbtString))
+    }
+
     @Volatile
     private var itemRegistryIndexed = false
 

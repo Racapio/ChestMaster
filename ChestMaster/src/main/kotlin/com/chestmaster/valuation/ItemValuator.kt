@@ -83,14 +83,34 @@ object ItemValuator {
     private val npcPrices = ConcurrentHashMap<String, Double>()
     private val loggedIds = Collections.synchronizedSet(HashSet<String>())
 
+    @Volatile
     private var lastBazaarUpdate: Long = 0
+    @Volatile
     private var lastLbinUpdate: Long = 0
+    @Volatile
     private var lastNpcUpdate: Long = 0
     @Volatile
     private var lastNpcSource: String = "none"
+    @Volatile
+    private var lbinUnavailable: Boolean = false
+
     private val pricesLoaded = AtomicBoolean(false)
-    private val successfulLoads = AtomicInteger(0)
-    private const val CACHE_DURATION: Long = 300000
+
+    // Bumped whenever any price data actually changes (bazaar/LBIN/NPC/pet fetches).
+    // The GUI watches this to invalidate its per-item price caches.
+    private val dataEpoch = java.util.concurrent.atomic.AtomicLong(0)
+
+    fun getDataEpoch(): Long = dataEpoch.get()
+    // Track how many of the 3 sources have finished (success or failure).
+    // Prices are marked loaded once all 3 complete regardless of individual outcome.
+    private val pendingSourceCount = AtomicInteger(0)
+    private const val TOTAL_PRICE_SOURCES = 3
+
+    // Configurable via ModConfig.bazaarUpdateInterval (seconds); clamped to a sane range.
+    private val cacheDurationMs: Long
+        get() = runCatching { ChestMasterMod.configManager.config.bazaarUpdateInterval }
+            .getOrDefault(300)
+            .coerceIn(60, 3600) * 1000L
 
     private val httpClient = HttpClient.newBuilder()
         .followRedirects(HttpClient.Redirect.ALWAYS)
@@ -101,6 +121,21 @@ object ItemValuator {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     var currentMode = PriceMode.SELL_OFFER
+
+    /** Sets the price mode and persists it to the config. */
+    fun setPriceMode(mode: PriceMode) {
+        currentMode = mode
+        runCatching {
+            ChestMasterMod.configManager.config.priceMode = mode.name
+            ChestMasterMod.configManager.save()
+        }
+    }
+
+    fun togglePriceMode(): PriceMode {
+        val next = if (currentMode == PriceMode.SELL_OFFER) PriceMode.BUY_ORDER else PriceMode.SELL_OFFER
+        setPriceMode(next)
+        return next
+    }
 
     fun getTotalValue(stack: ItemStack): Double {
         if (stack.isEmpty) return 0.0
@@ -121,9 +156,17 @@ object ItemValuator {
 
     fun getPriceBreakdownFromNbt(itemIdHint: String?, nbtString: String): PriceBreakdown {
         val normalizedHint = ItemUtils.normalizeSkyblockId(itemIdHint)
-        val id = ItemUtils.extractSkyblockIdFromNbtString(nbtString) ?: normalizedHint ?: "UNKNOWN"
-
         val extraAttributes = ItemUtils.extractExtraAttributesFromNbtString(nbtString)
+
+        // Pets carry the generic id "PET"; the market key is "TYPE;TIER_INDEX" from petInfo.
+        val petKey = ItemUtils.extractPetKey(extraAttributes)
+        val rawId = ItemUtils.extractSkyblockIdFromNbtString(nbtString)
+            ?: normalizedHint
+            ?: "UNKNOWN"
+        // Attribute shards carry the generic id "ATTRIBUTE_SHARD"; the Bazaar key
+        // ("SHARD_NIGHT_SQUID") is derived from the item's display name.
+        val shardKey = if (rawId == "ATTRIBUTE_SHARD") ItemUtils.shardMarketKeyFromNbt(nbtString) else null
+        val id = petKey ?: shardKey ?: rawId
         val context = PriceContext(
             stars = extraAttributes?.let { getStars(it) } ?: 0,
             recombed = extraAttributes?.let { isRecombed(it) } ?: false,
@@ -585,8 +628,12 @@ object ItemValuator {
     }
 
     fun updateAllPrices() {
-        successfulLoads.set(0)
+        // Mark all 3 sources as pending before launching async loads.
+        // CAS from 0 guards against overlapping refreshes: a second call while sources are
+        // still in flight would reset the counter and flip pricesLoaded=true prematurely.
+        if (!pendingSourceCount.compareAndSet(0, TOTAL_PRICE_SOURCES)) return
         pricesLoaded.set(false)
+        lbinUnavailable = false
         loggedIds.clear()
         updateBazaarPrices()
         updateLbinPrices()
@@ -594,8 +641,8 @@ object ItemValuator {
     }
 
     private fun updateBazaarPrices() {
-        if (System.currentTimeMillis() - lastBazaarUpdate < CACHE_DURATION && bazaarSellPrices.isNotEmpty()) {
-            checkLoadCompletion()
+        if (System.currentTimeMillis() - lastBazaarUpdate < cacheDurationMs && bazaarSellPrices.isNotEmpty()) {
+            markSourceComplete()
             return
         }
         CompletableFuture.runAsync {
@@ -603,6 +650,7 @@ object ItemValuator {
                 val request = HttpRequest.newBuilder()
                     .uri(URI.create("https://api.hypixel.net/skyblock/bazaar"))
                     .header("User-Agent", USER_AGENT)
+                    .timeout(Duration.ofSeconds(15))
                     .GET().build()
                 val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
                 if (response.statusCode() == 200) {
@@ -617,47 +665,267 @@ object ItemValuator {
                             bazaarBuyPrices[key] = status.get("buyPrice").asDouble
                         }
                         lastBazaarUpdate = System.currentTimeMillis()
+                        dataEpoch.incrementAndGet()
                     }
                 }
             } catch (e: Exception) {
                 logVerboseWarn("Bazaar update failed: ${e.message}")
             } finally {
-                checkLoadCompletion()
+                markSourceComplete()
             }
         }
     }
 
     private fun updateLbinPrices() {
-        if (System.currentTimeMillis() - lastLbinUpdate < CACHE_DURATION && lbinPrices.isNotEmpty()) {
-            checkLoadCompletion()
+        if (System.currentTimeMillis() - lastLbinUpdate < cacheDurationMs && lbinPrices.isNotEmpty()) {
+            // Bulk data is still fresh, but pets scanned since the last refresh may be missing.
+            CompletableFuture.runAsync {
+                try {
+                    enrichMissingPricesFromCoflnet()
+                } catch (e: Exception) {
+                    ChestMasterMod.LOGGER.warn("[ChestMaster] Coflnet price enrichment failed: ${e.javaClass.simpleName}: ${e.message}")
+                } finally {
+                    markSourceComplete()
+                }
+            }
             return
         }
         CompletableFuture.runAsync {
-            try {
-                val request = HttpRequest.newBuilder()
-                    .uri(URI.create("https://moulberry.codes/lowestbin.json"))
-                    .header("User-Agent", USER_AGENT)
-                    .GET().build()
-                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-                if (response.statusCode() == 200) {
-                    val json = JsonParser.parseString(response.body()).asJsonObject
-                    lbinPrices.clear()
-                    for (entry in json.entrySet()) {
-                        lbinPrices[entry.key] = entry.value.asDouble
+            // Each entry: URL to fetch + parser that knows its response shape.
+            // moulberry.codes/lowestbin.json         → flat JSON object {id: price}  (primary, community LBIN dump)
+            // hysky.de/api/auctions/lowestbins       → flat JSON object {id: price}  (Skyblocker static API, reliable)
+            // sky.coflnet.com/api/item/price/*/bins  → queried per-item; not suitable as bulk fallback
+            val lbinSources = listOf(
+                "https://moulberry.codes/lowestbin.json" to ::parseLbinObject,
+                "https://hysky.de/api/auctions/lowestbins" to ::parseLbinObject
+            )
+            var loaded = false
+            for ((url, parser) in lbinSources) {
+                try {
+                    val request = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .header("User-Agent", USER_AGENT)
+                        .timeout(Duration.ofSeconds(15))
+                        .GET().build()
+                    val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                    if (response.statusCode() == 200) {
+                        val parsed = parser(response.body())
+                        if (parsed.isNotEmpty()) {
+                            lbinPrices.clear()
+                            lbinPrices.putAll(parsed)
+                            lastLbinUpdate = System.currentTimeMillis()
+                            dataEpoch.incrementAndGet()
+                            loaded = true
+                            ChestMasterMod.LOGGER.info("[ChestMaster] LBIN loaded ${parsed.size} entries from $url")
+                            break
+                        } else {
+                            ChestMasterMod.LOGGER.warn("[ChestMaster] LBIN source $url returned 0 usable entries (body len=${response.body().length})")
+                        }
+                    } else {
+                        ChestMasterMod.LOGGER.warn("[ChestMaster] LBIN source $url returned HTTP ${response.statusCode()}")
                     }
-                    lastLbinUpdate = System.currentTimeMillis()
+                } catch (e: Exception) {
+                    ChestMasterMod.LOGGER.warn("[ChestMaster] LBIN source $url failed: ${e.javaClass.simpleName}: ${e.message}")
                 }
-            } catch (e: Exception) {
-                logVerboseWarn("LBIN update failed: ${e.message}")
-            } finally {
-                checkLoadCompletion()
             }
+            if (!loaded) {
+                lbinUnavailable = true
+                ChestMasterMod.LOGGER.warn("[ChestMaster] All LBIN sources unavailable; auction prices will show as Unknown.")
+            }
+            // Bulk LBIN dumps (hysky.de) contain no pets — fill the gap per pet via Coflnet.
+            try {
+                enrichMissingPricesFromCoflnet()
+            } catch (e: Exception) {
+                ChestMasterMod.LOGGER.warn("[ChestMaster] Coflnet price enrichment failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+            markSourceComplete()
         }
     }
 
+    /**
+     * Fetches lowest-bin prices from the Coflnet API for items the bulk sources don't cover:
+     * pets (keyed "TYPE;TIER_INDEX") and any other stored SkyBlock ids unknown to
+     * Bazaar/hysky/NPC data. hysky.de omits pets and several AH items entirely, and
+     * moulberry.codes is frequently down, so these would otherwise always price at 0.
+     */
+    private const val MAX_COFLNET_REQUESTS_PER_REFRESH = 40
+
+    // Coflnet rate-limits rapid-fire requests with HTTP 403 — space them out and back off.
+    private const val COFLNET_REQUEST_SPACING_MS = 350L
+    private const val COFLNET_RATE_LIMIT_BACKOFF_MS = 2000L
+
+    // Ids Coflnet reported as unknown or unlisted this session — pointless to re-request.
+    private val coflnetDeadIds = Collections.synchronizedSet(HashSet<String>())
+
+    private data class CoflnetTarget(val storeKey: String, val itemTag: String, val query: String?)
+
+    private fun enrichMissingPricesFromCoflnet() {
+        val targets = LinkedHashMap<String, CoflnetTarget>()
+
+        // Pets: bulk LBIN keys are "TYPE;TIER_INDEX"; Coflnet prices them per rarity.
+        try {
+            for (nbt in ChestMasterMod.db.listDistinctPetNbts()) {
+                val petKey = ItemUtils.extractPetKey(ItemUtils.extractExtraAttributesFromNbtString(nbt)) ?: continue
+                val rarity = ItemUtils.petTierNameFromKey(petKey) ?: continue
+                targets[petKey] = CoflnetTarget(petKey, "PET_${petKey.substringBefore(';')}", "Rarity=$rarity")
+            }
+        } catch (e: Exception) {
+            ChestMasterMod.LOGGER.warn("[ChestMaster] Coflnet enrichment failed to read pets from DB: ${e.message}")
+        }
+
+        // Any other stored SkyBlock ids (e.g. AH items missing from the hysky dump).
+        try {
+            for (id in ChestMasterMod.db.listDistinctSkyblockItemIds()) {
+                if (id.contains(':')) continue // vanilla ids, not SkyBlock market tags
+                if (id == "PET" || id == "ATTRIBUTE_SHARD" || id == "UNKNOWN") continue
+                targets.putIfAbsent(id, CoflnetTarget(id, id, null))
+            }
+        } catch (e: Exception) {
+            ChestMasterMod.LOGGER.warn("[ChestMaster] Coflnet enrichment failed to read item ids from DB: ${e.message}")
+        }
+
+        val missing = targets.values
+            .filter { target ->
+                target.storeKey !in coflnetDeadIds &&
+                    (lbinPrices[target.storeKey] ?: 0.0) <= 0.0 &&
+                    !lookupPrice(target.storeKey).found
+            }
+            .take(MAX_COFLNET_REQUESTS_PER_REFRESH)
+        if (missing.isEmpty()) return
+
+        var loadedCount = 0
+        var failedCount = 0
+        var lastError: String? = null
+
+        loop@ for ((index, target) in missing.withIndex()) {
+            if (index > 0) Thread.sleep(COFLNET_REQUEST_SPACING_MS)
+
+            var response = sendCoflnetRequest(target)
+            if (response != null && response.statusCode() == 403) {
+                Thread.sleep(COFLNET_RATE_LIMIT_BACKOFF_MS)
+                response = sendCoflnetRequest(target)
+            }
+
+            when {
+                response == null -> {
+                    failedCount += 1
+                    lastError = "request error for ${target.storeKey}"
+                }
+
+                response.statusCode() == 200 -> {
+                    val lowest = runCatching {
+                        JsonParser.parseString(response.body())
+                            .takeIf { it.isJsonObject }
+                            ?.asJsonObject?.get("lowest").asDoubleOrNull()
+                    }.getOrNull()
+                    if (lowest != null && lowest > 0.0) {
+                        lbinPrices[target.storeKey] = lowest
+                        loadedCount += 1
+                    } else {
+                        // Known item but no listings — don't re-request this session.
+                        coflnetDeadIds.add(target.storeKey)
+                    }
+                }
+
+                response.statusCode() == 403 -> {
+                    // Still rate-limited after backing off: give up for this round,
+                    // the remaining ids are retried on the next refresh / GUI open.
+                    failedCount += missing.size - index
+                    lastError = "HTTP 403 (rate limited), aborting round"
+                    break@loop
+                }
+
+                response.statusCode() in 400..499 -> {
+                    // Unknown/untradeable tag — remember and stop asking.
+                    coflnetDeadIds.add(target.storeKey)
+                }
+
+                else -> {
+                    failedCount += 1
+                    lastError = "HTTP ${response.statusCode()} for ${target.storeKey}"
+                }
+            }
+        }
+
+        if (loadedCount > 0) {
+            dataEpoch.incrementAndGet()
+            ChestMasterMod.LOGGER.info("[ChestMaster] Loaded $loadedCount market price(s) from Coflnet")
+        }
+        // Always log failures: silent price gaps are impossible to diagnose from user reports.
+        if (failedCount > 0) {
+            ChestMasterMod.LOGGER.warn(
+                "[ChestMaster] $failedCount Coflnet price request(s) failed (last: $lastError)"
+            )
+        }
+    }
+
+    private fun sendCoflnetRequest(target: CoflnetTarget): java.net.http.HttpResponse<String>? {
+        return try {
+            val url = "https://sky.coflnet.com/api/item/price/${target.itemTag}/bin" +
+                (target.query?.let { "?$it" } ?: "")
+            httpClient.send(buildGetRequest(url), HttpResponse.BodyHandlers.ofString())
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Parses a flat JSON object: {"ITEM_ID": price, ...}
+     * Used for moulberry.codes/lowestbin.json
+     */
+    private fun parseLbinObject(body: String): Map<String, Double> {
+        val result = HashMap<String, Double>()
+        val element = runCatching { JsonParser.parseString(body) }.getOrNull() ?: return result
+        if (!element.isJsonObject) return result
+        for (entry in element.asJsonObject.entrySet()) {
+            val price = entry.value.asDoubleOrNull() ?: continue
+            if (price > 0 && entry.key.isNotBlank()) result[entry.key] = price
+        }
+        return result
+    }
+
+    /**
+     * Parses either:
+     *   - A flat JSON object: {"ITEM_ID": price, ...}
+     *   - A JSON array of auction objects: [{tag|id: "ITEM_ID", price|lowestBin: price}, ...]
+     * Used for sky.coflnet.com which may return either format.
+     */
+    private fun parseLbinFlexible(body: String): Map<String, Double> {
+        val result = HashMap<String, Double>()
+        val element = runCatching { JsonParser.parseString(body) }.getOrNull() ?: return result
+        when {
+            element.isJsonObject -> {
+                for (entry in element.asJsonObject.entrySet()) {
+                    val price = entry.value.asDoubleOrNull() ?: continue
+                    if (price > 0 && entry.key.isNotBlank()) result[entry.key] = price
+                }
+            }
+            element.isJsonArray -> {
+                for (item in element.asJsonArray) {
+                    if (!item.isJsonObject) continue
+                    val obj = item.asJsonObject
+                    // Try common "tag" field names used by different API responses
+                    val tag = obj.get("tag").asStringOrNull()
+                        ?: obj.get("itemTag").asStringOrNull()
+                        ?: obj.get("id").asStringOrNull()
+                        ?: obj.get("itemId").asStringOrNull()
+                        ?: continue
+                    // Try common "price" field names
+                    val price = obj.get("price").asDoubleOrNull()
+                        ?: obj.get("lowestBin").asDoubleOrNull()
+                        ?: obj.get("lowest_bin").asDoubleOrNull()
+                        ?: obj.get("lbin").asDoubleOrNull()
+                        ?: continue
+                    if (price > 0 && tag.isNotBlank()) result[tag] = price
+                }
+            }
+        }
+        return result
+    }
+
     private fun updateNpcPrices() {
-        if (System.currentTimeMillis() - lastNpcUpdate < CACHE_DURATION && npcPrices.isNotEmpty()) {
-            checkLoadCompletion()
+        if (System.currentTimeMillis() - lastNpcUpdate < cacheDurationMs && npcPrices.isNotEmpty()) {
+            markSourceComplete()
             return
         }
         CompletableFuture.runAsync {
@@ -667,8 +935,15 @@ object ItemValuator {
             } catch (e: Exception) {
                 logVerboseWarn("NPC update failed: ${e.message}")
             } finally {
-                checkLoadCompletion()
+                markSourceComplete()
             }
+        }
+    }
+
+    /** Decrements the pending-source counter; marks prices loaded when all sources have finished. */
+    private fun markSourceComplete() {
+        if (pendingSourceCount.decrementAndGet() <= 0) {
+            pricesLoaded.set(true)
         }
     }
 
@@ -896,6 +1171,7 @@ object ItemValuator {
         npcPrices.putAll(loadedPrices)
         lastNpcUpdate = System.currentTimeMillis()
         lastNpcSource = sourceName
+        dataEpoch.incrementAndGet()
         return true
     }
 
@@ -951,14 +1227,14 @@ object ItemValuator {
         }
     }
 
-    private fun checkLoadCompletion() {
-        if (successfulLoads.incrementAndGet() >= 3) pricesLoaded.set(true)
-    }
-
     fun arePricesLoaded(): Boolean = pricesLoaded.get()
 
+    fun isLbinUnavailable(): Boolean = lbinUnavailable
+
     fun getDebugStatus(): String {
-        return "loaded=${pricesLoaded.get()}, bazaar=${bazaarSellPrices.size}, lbin=${lbinPrices.size}, npc=${npcPrices.size}, npcSource=$lastNpcSource"
+        return "loaded=${pricesLoaded.get()}, bazaar=${bazaarSellPrices.size}, lbin=${lbinPrices.size}" +
+            (if (lbinUnavailable) " (unavailable)" else "") +
+            ", npc=${npcPrices.size}, npcSource=$lastNpcSource"
     }
 
     fun formatPrice(price: Double): String {

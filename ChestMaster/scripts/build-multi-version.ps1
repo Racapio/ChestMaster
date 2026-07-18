@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$GradleTask = "build"
 )
 
@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $gradle = Join-Path $projectRoot "gradlew.bat"
 $wrapperProps = Join-Path $projectRoot "gradle\wrapper\gradle-wrapper.properties"
-$propsFile = Join-Path $projectRoot "gradle.properties"
+$versionsDir = Join-Path $projectRoot "versions"
 $libsDir = Join-Path $projectRoot "build\libs"
 $outDir = Join-Path $projectRoot "dist\multi-version"
 
@@ -19,15 +19,11 @@ if (!(Test-Path $wrapperProps)) {
     throw "gradle-wrapper.properties not found at $wrapperProps"
 }
 
-if (!(Test-Path $propsFile)) {
-    throw "gradle.properties not found at $propsFile"
-}
-
 $distributionLine = Select-String -Path $wrapperProps -Pattern '^\s*distributionUrl\s*=\s*(.+)$' | Select-Object -First 1
 if ($null -eq $distributionLine) {
     throw "Could not read distributionUrl from $wrapperProps"
 }
-$distributionUrl = $distributionLine.Matches[0].Groups[1].Value.Trim() -replace '\\:','\:'
+$distributionUrl = $distributionLine.Matches[0].Groups[1].Value.Trim() -replace '\\:',':'
 $wrapperVersionMatch = [regex]::Match($distributionUrl, 'gradle-([0-9.]+)-bin\.zip')
 if (!$wrapperVersionMatch.Success) {
     throw "Could not parse Gradle version from distributionUrl: $distributionUrl"
@@ -41,37 +37,21 @@ $localGradleBat = Get-ChildItem -Path (Join-Path $env:USERPROFILE ".gradle\wrapp
 $gradleCommand = if ($localGradleBat) { $localGradleBat } else { $gradle }
 Write-Host "Using Gradle command: $gradleCommand" -ForegroundColor DarkCyan
 
-$modVersionLine = Select-String -Path $propsFile -Pattern '^\s*mod_version\s*=\s*(.+)$' | Select-Object -First 1
-if ($null -eq $modVersionLine) {
-    throw "Could not read mod_version from gradle.properties"
+# One build per version profile in versions/*.properties (26.1.2, 26.2, ...).
+$profiles = Get-ChildItem -Path $versionsDir -Filter "*.properties" |
+    Sort-Object Name |
+    ForEach-Object { $_.BaseName }
+
+if ($profiles.Count -eq 0) {
+    throw "No version profiles found in $versionsDir"
 }
-$rawVersion = $modVersionLine.Matches[0].Groups[1].Value.Trim()
-$baseVersion = $rawVersion -replace '\+mc\d+\.\d+\.\d+$', ''
 
-$variants = @(
-    @{
-        Minecraft = "1.21.11"
-        FabricApi = "0.141.3+1.21.11"
-        KotlinLoader = "1.13.9+kotlin.2.3.10"
-    },
-    @{
-        Minecraft = "1.21.10"
-        FabricApi = "0.138.0+1.21.10"
-        KotlinLoader = "1.13.8+kotlin.2.3.0"
-    }
-)
-
-foreach ($variant in $variants) {
-    $mc = $variant.Minecraft
-    $fabricApi = $variant.FabricApi
-    $kotlinLoader = $variant.KotlinLoader
-    $variantVersion = "$baseVersion+mc$mc"
-
-    Write-Host "=== Building ChestMaster for Minecraft $mc (fabric-api $fabricApi, fabric-language-kotlin $kotlinLoader) ===" -ForegroundColor Cyan
+foreach ($mc in $profiles) {
+    Write-Host "=== Building ChestMaster for Minecraft $mc ===" -ForegroundColor Cyan
 
     Push-Location $projectRoot
     try {
-        & $gradleCommand clean $GradleTask "-Pmod_version=$variantVersion" "-Pminecraft_version=$mc" "-Pfabric_version=$fabricApi" "-Pkotlin_loader_version=$kotlinLoader"
+        & $gradleCommand clean $GradleTask "-PmcVersion=$mc"
         if ($LASTEXITCODE -ne 0) {
             throw "Build failed for Minecraft $mc"
         }
@@ -79,20 +59,21 @@ foreach ($variant in $variants) {
         Pop-Location
     }
 
-    $mainJar = Join-Path $libsDir "chestmaster-$variantVersion.jar"
-    $sourcesJar = Join-Path $libsDir "chestmaster-$variantVersion-sources.jar"
+    $mainJar = Get-ChildItem -Path $libsDir -Filter "chestmaster-mc$mc-*.jar" |
+        Where-Object { $_.Name -notlike "*-sources.jar" } |
+        Select-Object -First 1
 
-    if (!(Test-Path $mainJar)) {
-        throw "Expected jar not found: $mainJar"
+    if ($null -eq $mainJar) {
+        throw "Expected jar not found in ${libsDir} for Minecraft $mc"
     }
 
     # Validate embedded metadata so wrong-target jars are caught immediately.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($mainJar)
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($mainJar.FullName)
     try {
         $entry = $zip.Entries | Where-Object { $_.FullName -eq "fabric.mod.json" } | Select-Object -First 1
         if ($null -eq $entry) {
-            throw "fabric.mod.json not found in $mainJar"
+            throw "fabric.mod.json not found in $($mainJar.FullName)"
         }
 
         $reader = New-Object System.IO.StreamReader($entry.Open())
@@ -102,22 +83,22 @@ foreach ($variant in $variants) {
             $reader.Close()
         }
 
-        if ($modJson.version -ne $variantVersion) {
-            throw "Version mismatch in ${mainJar}: expected '$variantVersion', got '$($modJson.version)'"
+        if ($modJson.version -notlike "*+mc$mc") {
+            throw "Version mismatch in $($mainJar.Name): expected suffix '+mc$mc', got '$($modJson.version)'"
         }
-        if ($modJson.depends.minecraft -ne $mc) {
-            throw "Minecraft dependency mismatch in ${mainJar}: expected '$mc', got '$($modJson.depends.minecraft)'"
-        }
-        if ($modJson.depends.'fabric-language-kotlin' -ne ">=$kotlinLoader") {
-            throw "fabric-language-kotlin dependency mismatch in ${mainJar}: expected '>=$kotlinLoader', got '$($modJson.depends.'fabric-language-kotlin')'"
+        # The minecraft dependency is a range covering the patch series (e.g. ">=26.1 <26.2").
+        $mcMinor = ($mc.Split(".")[0..1] -join ".")
+        if ($modJson.depends.minecraft -notlike "*$mcMinor*") {
+            throw "Minecraft dependency mismatch in $($mainJar.Name): expected range around '$mcMinor', got '$($modJson.depends.minecraft)'"
         }
     } finally {
         $zip.Dispose()
     }
 
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-    Copy-Item $mainJar -Destination (Join-Path $outDir (Split-Path $mainJar -Leaf)) -Force
+    Copy-Item $mainJar.FullName -Destination (Join-Path $outDir $mainJar.Name) -Force
 
+    $sourcesJar = Join-Path $libsDir ($mainJar.Name -replace '\.jar$', '-sources.jar')
     if (Test-Path $sourcesJar) {
         Copy-Item $sourcesJar -Destination (Join-Path $outDir (Split-Path $sourcesJar -Leaf)) -Force
     }

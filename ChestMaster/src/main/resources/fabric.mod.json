@@ -7,6 +7,7 @@
   "authors": ["Manus"],
   "contact": {},
   "license": "MIT",
+  "icon": "assets/chestmaster/icon.png",
   "environment": "client",
   "entrypoints": {
     "main": [
@@ -14,6 +15,9 @@
     ],
     "client": [
       "com.client.chestmasterClient"
+    ],
+    "modmenu": [
+      "com.chestmaster.integration.ModMenuIntegration"
     ]
   },
   "mixins": [
@@ -27,6 +31,9 @@
     "fabricloader": ">=${loader_version}",
     "fabric-language-kotlin": ">=${kotlin_loader_version}",
     "fabric-api": "*",
-    "minecraft": ">=${minecraft_version}"
+    "minecraft": "${minecraft_dep_version}"
+  },
+  "suggests": {
+    "modmenu": "*"
   }
 }

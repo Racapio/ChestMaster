@@ -1,8 +1,11 @@
 package com.chestmaster.scanner
 
 import com.chestmaster.ChestMasterMod
+import com.chestmaster.compat.VersionHelper
 import com.chestmaster.database.ItemRecord
+import com.chestmaster.util.ContainerFilters
 import com.chestmaster.util.ItemUtils
+import com.chestmaster.util.WorldUtils
 import com.chestmaster.util.skyblockId
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
@@ -19,6 +22,7 @@ object ChestScanner {
         val handler: ChestMenu,
         val title: String,
         val chestPos: BlockPos?,
+        val serverKey: String,
         var ticksUntilAttempt: Int,
         var attemptsLeft: Int
     )
@@ -32,9 +36,19 @@ object ChestScanner {
     @Volatile
     private var lastScanTimeMs = 0L
 
+    // All access to pendingScan is from the client tick thread, so @Volatile is sufficient.
     @Volatile
     private var pendingScan: PendingScan? = null
 
+    // Cache the resolved chest position for up to 1 second to avoid re-scanning 1521 blocks
+    // on every retry tick.
+    @Volatile
+    private var cachedChestPos: BlockPos? = null
+
+    @Volatile
+    private var cachedChestPosTimestampMs = 0L
+
+    private const val CHEST_POS_CACHE_MS = 1000L
     private const val DUPLICATE_SCAN_WINDOW_MS = 1000L
     private const val INITIAL_SCAN_DELAY_TICKS = 6
     private const val RETRY_DELAY_TICKS = 3
@@ -42,24 +56,10 @@ object ChestScanner {
     private const val CHEST_SEARCH_RADIUS_XZ = 6
     private const val CHEST_SEARCH_RADIUS_Y = 4
 
+    // Blocked titles (menus, reward chests, ender chest) live in ContainerFilters —
+    // shared with DatabaseManager so old rows are purged with the same rules.
     private val allowedChestTitleKeywords = listOf(
-        "chest",
-        "ender chest"
-    )
-
-    private val blockedContainerKeywords = listOf(
-        "minion",
-        "auction",
-        "bazaar",
-        "pet",
-        "museum",
-        "wardrobe",
-        "trade",
-        "menu",
-        "craft",
-        "profile",
-        "bank",
-        "dungeon"
+        "chest"
     )
 
     fun isAutoScanEnabled(): Boolean = autoScanEnabled
@@ -76,6 +76,11 @@ object ChestScanner {
         autoScanEnabled = false
         pendingScan = null
         return true
+    }
+
+    fun setAutoScanEnabled(enabled: Boolean) {
+        autoScanEnabled = enabled
+        if (!enabled) pendingScan = null
     }
 
     fun onScreenOpen(screen: AbstractContainerScreen<*>, handler: ChestMenu) {
@@ -128,7 +133,7 @@ object ChestScanner {
     fun onClientTick(client: Minecraft) {
         val task = pendingScan ?: return
 
-        val current = client.screen
+        val current = VersionHelper.currentScreen(client)
         if (current !== task.screen) {
             pendingScan = null
             return
@@ -149,7 +154,8 @@ object ChestScanner {
             screen = task.screen,
             handler = task.handler,
             deduplicate = false,
-            forcedChestPos = task.chestPos
+            forcedChestPos = task.chestPos,
+            serverKeyOverride = task.serverKey
         )
         if (scanned > 0) {
             pendingScan = null
@@ -195,6 +201,7 @@ object ChestScanner {
             handler = handler,
             title = title,
             chestPos = normalizedPos,
+            serverKey = WorldUtils.getCurrentServerKey(),
             ticksUntilAttempt = initialDelay.coerceAtLeast(0),
             attemptsLeft = MAX_SCAN_ATTEMPTS
         )
@@ -204,7 +211,8 @@ object ChestScanner {
         screen: AbstractContainerScreen<*>,
         handler: ChestMenu,
         deduplicate: Boolean,
-        forcedChestPos: BlockPos? = null
+        forcedChestPos: BlockPos? = null,
+        serverKeyOverride: String? = null
     ): Int {
         val title = screen.title.string
         val now = System.currentTimeMillis()
@@ -224,6 +232,8 @@ object ChestScanner {
             ChestMasterMod.LOGGER.debug("Chest position could not be resolved for '$title'; using legacy 0,0,0.")
         }
 
+        val serverKey = serverKeyOverride ?: WorldUtils.getCurrentServerKey()
+        val scanTime = System.currentTimeMillis()
         val itemsToSave = mutableListOf<ItemRecord>()
         val rows = handler.rowCount
         val chestSize = rows * 9
@@ -248,7 +258,9 @@ object ChestScanner {
                         chestX = pos.x,
                         chestY = pos.y,
                         chestZ = pos.z,
-                        label = title
+                        label = title,
+                        serverKey = serverKey,
+                        lastSeen = scanTime
                     )
                 )
             }
@@ -256,19 +268,16 @@ object ChestScanner {
 
         if (itemsToSave.isEmpty()) return 0
 
-        Thread(
-            {
-                try {
-                    ChestMasterMod.db.saveItems(itemsToSave)
-                    if (ChestMasterMod.isVerboseLogging()) {
-                        ChestMasterMod.LOGGER.debug("Saved ${itemsToSave.size} items from $title")
-                    }
-                } catch (e: Exception) {
-                    ChestMasterMod.LOGGER.error("Failed to save items to database", e)
+        ChestMasterMod.dbExecutor.execute {
+            try {
+                ChestMasterMod.db.saveItems(itemsToSave)
+                if (ChestMasterMod.isVerboseLogging()) {
+                    ChestMasterMod.LOGGER.debug("Saved ${itemsToSave.size} items from $title")
                 }
-            },
-            "ChestMaster-DB-Save"
-        ).start()
+            } catch (e: Exception) {
+                ChestMasterMod.LOGGER.error("Failed to save items to database", e)
+            }
+        }
 
         return itemsToSave.size
     }
@@ -279,6 +288,12 @@ object ChestScanner {
         val player = client.player ?: return null
 
         resolveFocusedStoragePos()?.let { return it }
+
+        // Return the cached position if it is still fresh.
+        val now = System.currentTimeMillis()
+        if (now - cachedChestPosTimestampMs < CHEST_POS_CACHE_MS) {
+            return cachedChestPos
+        }
 
         val center = player.blockPosition()
         var nearest: BlockPos? = null
@@ -300,7 +315,10 @@ object ChestScanner {
             }
         }
 
-        return normalizeStoragePos(nearest)
+        val result = normalizeStoragePos(nearest)
+        cachedChestPos = result
+        cachedChestPosTimestampMs = now
+        return result
     }
 
     private fun resolveFocusedStoragePos(): BlockPos? {
@@ -354,10 +372,10 @@ object ChestScanner {
     }
 
     private fun isScannableContainerTitle(title: String, focusedStoragePos: BlockPos?): Boolean {
-        val normalized = title.lowercase()
-        if (blockedContainerKeywords.any { normalized.contains(it) }) {
+        if (ContainerFilters.isBlockedTitle(title)) {
             return false
         }
+        val normalized = title.lowercase()
         if (allowedChestTitleKeywords.any { normalized.contains(it) }) {
             return true
         }

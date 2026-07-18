@@ -13,10 +13,10 @@ The mod is read-only QoL: no automation, no movement/combat macros, no packet sp
 
 | Minecraft | Loader |
 |---|---|
-| `1.21.10` | Fabric |
-| `1.21.11` | Fabric |
-| `26.1` | Fabric |
-| `26.1.2` | Fabric (requires Java 25) |
+| `26.1` – `26.1.2` | Fabric (requires Java 25) |
+| `26.2` | Fabric (requires Java 25) |
+
+> Older builds for MC `1.21.10` / `1.21.11` are still available in past releases but are no longer maintained.
 
 ## Installation
 
@@ -27,9 +27,8 @@ The mod is read-only QoL: no automation, no movement/combat macros, no packet sp
 
 | Instance | JAR to use |
 |---|---|
-| `1.21.10` | `...+mc1.21.10.jar` |
-| `1.21.11` | `...+mc1.21.11.jar` |
-| `26.1` / `26.1.2` | `...+mc26.1.2.jar` |
+| `26.1` / `26.1.1` / `26.1.2` | `...+mc26.1.2.jar` |
+| `26.2` | `...+mc26.2.jar` |
 
 ## Commands
 
@@ -76,11 +75,12 @@ This is not an official legal guarantee. Always follow the latest Hypixel polici
 
 ```powershell
 cd ChestMaster
-./gradlew.bat build -PmcVersion=1.21.10
-./gradlew.bat build -PmcVersion=1.21.11
-./gradlew.bat build -PmcVersion=26.1
+./gradlew.bat build                      # default profile (26.1.2)
 ./gradlew.bat build -PmcVersion=26.1.2
+./gradlew.bat build -PmcVersion=26.2
 ```
+
+Requires Java 25 (Gradle toolchain resolves it automatically).
 
 Build outputs go to `ChestMaster/build/libs/`.
 

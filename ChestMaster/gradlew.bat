@@ -31,6 +31,14 @@ set TARGET_DIR=%DIST_DIR%\%BASE_NAME%
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%" >nul 2>&1
 
 set GRADLE_HOME=
+rem Standard Gradle wrapper cache has a hash subdirectory: TARGET_DIR\{hash}\gradle-X.Y.Z
+for /d %%H in ("%TARGET_DIR%\*") do (
+  for /d %%D in ("%%H\gradle-*") do (
+    set GRADLE_HOME=%%D
+    goto :found
+  )
+)
+rem Fallback: flat layout (no hash subdir)
 for /d %%D in ("%TARGET_DIR%\gradle-*") do (
   set GRADLE_HOME=%%D
   goto :found
@@ -46,8 +54,14 @@ if not exist "%GRADLE_HOME%\bin\gradle.bat" (
     exit /b 1
   )
   echo Extracting Gradle...
-  powershell -NoProfile -Command "Expand-Archive -Force '%TMP_ZIP%' '%TARGET_DIR%'" 
+  powershell -NoProfile -Command "Expand-Archive -Force '%TMP_ZIP%' '%TARGET_DIR%'"
   del /q "%TMP_ZIP%" >nul 2>&1
+  for /d %%H in ("%TARGET_DIR%\*") do (
+    for /d %%D in ("%%H\gradle-*") do (
+      set GRADLE_HOME=%%D
+      goto :found2
+    )
+  )
   for /d %%D in ("%TARGET_DIR%\gradle-*") do (
     set GRADLE_HOME=%%D
     goto :found2
@@ -60,5 +74,5 @@ if not exist "%GRADLE_HOME%\bin\gradle.bat" (
   exit /b 1
 )
 
-call "%GRADLE_HOME%\bin\gradle.bat" %*
-endlocal
+"%GRADLE_HOME%\bin\gradle.bat" %*
+endlocal & exit /b %ERRORLEVEL%

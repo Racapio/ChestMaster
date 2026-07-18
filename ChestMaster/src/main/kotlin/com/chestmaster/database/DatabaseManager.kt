@@ -1,6 +1,7 @@
 package com.chestmaster.database
 
 import com.chestmaster.ChestMasterMod
+import com.chestmaster.util.ContainerFilters
 import com.chestmaster.util.ItemUtils
 import net.minecraft.nbt.CompoundTag
 import net.minecraft.nbt.ListTag
@@ -49,6 +50,7 @@ class DatabaseManager {
             connection?.createStatement()?.use { it.execute("PRAGMA journal_mode=WAL") }
             createTables()
             migrateSchema()
+            cleanupBlockedContainerRows()
             if (ChestMasterMod.isVerboseLogging()) {
                 ChestMasterMod.LOGGER.info("Database initialized at $targetPath")
             }
@@ -121,6 +123,30 @@ class DatabaseManager {
         // pre-1.1.0 databases, causing "no such column: serverKey" and breaking all subsequent saves.
         connection?.createStatement()?.use { stmt ->
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_items_server ON items(serverKey)")
+        }
+    }
+
+    /**
+     * Purges rows saved from non-storage containers (Hypixel menus, reward chests,
+     * ender chest pages) by mods versions that lacked the title block-list.
+     */
+    private fun cleanupBlockedContainerRows() {
+        val conn = connection ?: return
+        var total = 0
+        runCatching {
+            conn.prepareStatement("DELETE FROM items WHERE lower(label) LIKE ?").use { stmt ->
+                for (keyword in ContainerFilters.blockedTitleKeywords) {
+                    stmt.setString(1, "%$keyword%")
+                    total += stmt.executeUpdate()
+                }
+            }
+        }.onFailure { error ->
+            ChestMasterMod.LOGGER.warn("Blocked-container cleanup failed: ${error.message}")
+        }
+        if (total > 0) {
+            ChestMasterMod.LOGGER.info(
+                "[ChestMaster] Removed $total stale record(s) from non-storage containers (menus/reward/ender chests)"
+            )
         }
     }
 
@@ -249,6 +275,34 @@ class DatabaseManager {
         return stackSimilarItems(results)
     }
 
+    /** Distinct SkyBlock item ids stored in the DB — used to fetch missing market prices. */
+    @Synchronized
+    fun listDistinctSkyblockItemIds(): List<String> {
+        val results = mutableListOf<String>()
+        connection?.prepareStatement("SELECT DISTINCT itemId FROM items WHERE itemId != ''")?.use { pstmt ->
+            pstmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    rs.getString(1)?.takeIf { it.isNotBlank() }?.let { results.add(it) }
+                }
+            }
+        }
+        return results
+    }
+
+    /** Distinct NBT payloads of stored pets — used to fetch per-pet market prices. */
+    @Synchronized
+    fun listDistinctPetNbts(): List<String> {
+        val results = mutableListOf<String>()
+        connection?.prepareStatement("SELECT DISTINCT itemNbt FROM items WHERE itemId = 'PET'")?.use { pstmt ->
+            pstmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    rs.getString(1)?.takeIf { it.isNotBlank() }?.let { results.add(it) }
+                }
+            }
+        }
+        return results
+    }
+
     @Synchronized
     fun resetItems(): Int {
         return resetItemsAndCompact().deletedRecords
@@ -284,6 +338,14 @@ class DatabaseManager {
             }
         }.onFailure { error ->
             ChestMasterMod.LOGGER.warn("VACUUM failed during DB reset: ${error.message}")
+        }
+
+        // Checkpoint again AFTER the vacuum: in WAL mode the rewritten pages sit in the
+        // WAL file until a checkpoint, so without this the main DB file never shrinks.
+        runCatching {
+            conn.createStatement().use { stmt ->
+                stmt.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            }
         }
 
         val sizeAfter = path?.let { safeFileSize(it) } ?: 0L
@@ -366,17 +428,30 @@ class DatabaseManager {
         return results.toList()
     }
 
+    @Synchronized
     fun exportToCsv(path: Path, serverKey: String? = null) {
-        val items = searchItems("", serverKey)
+        // Export raw per-chest rows: no stacking (coordinates stay accurate) and no row limit,
+        // unlike searchItems() which aggregates similar items and caps at 2000 rows.
+        val serverFilter = if (!serverKey.isNullOrBlank()) "WHERE (serverKey = ? OR serverKey = '')" else ""
+        val sql = "SELECT * FROM items $serverFilter ORDER BY displayName"
+
         Files.newBufferedWriter(path).use { writer ->
             writer.write("Name,Item ID,Count,Chest X,Chest Y,Chest Z,Label,Server,Last Seen\n")
-            for (item in items) {
-                val lastSeenStr = if (item.lastSeen > 0L) item.lastSeen.toString() else ""
-                writer.write(
-                    "${csvEscape(item.displayName)},${csvEscape(item.itemId)},${item.count}," +
-                        "${item.chestX},${item.chestY},${item.chestZ}," +
-                        "${csvEscape(item.label)},${csvEscape(item.serverKey)},$lastSeenStr\n"
-                )
+            connection?.prepareStatement(sql)?.use { pstmt ->
+                if (!serverKey.isNullOrBlank()) pstmt.setString(1, serverKey)
+                pstmt.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        val lastSeen = rs.getLong("lastSeen")
+                        val lastSeenStr = if (lastSeen > 0L) lastSeen.toString() else ""
+                        writer.write(
+                            "${csvEscape(rs.getString("displayName") ?: "")}," +
+                                "${csvEscape(rs.getString("itemId") ?: "")},${rs.getInt("count")}," +
+                                "${rs.getInt("chestX")},${rs.getInt("chestY")},${rs.getInt("chestZ")}," +
+                                "${csvEscape(rs.getString("label") ?: "")}," +
+                                "${csvEscape(rs.getString("serverKey") ?: "")},$lastSeenStr\n"
+                        )
+                    }
+                }
             }
         }
     }
@@ -479,5 +554,11 @@ class DatabaseManager {
         return runCatching {
             if (Files.exists(path)) Files.size(path) else 0L
         }.getOrDefault(0L)
+    }
+
+    @Synchronized
+    fun close() {
+        runCatching { connection?.close() }
+        connection = null
     }
 }
