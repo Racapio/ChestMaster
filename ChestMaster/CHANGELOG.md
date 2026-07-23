@@ -5,6 +5,17 @@
 
 ---
 
+## [1.2.1] — 2026-07-24
+
+### 🐛 Fixed / Исправлено
+
+| Bug | Description |
+|---|---|
+| **Non-storage menus were still indexed** | The scanner used to allow any container whose title wasn't blocked as long as the crosshair pointed at a chest — so Hypixel menus opened while facing a chest (Loadouts, "At what price are you selling?", Sack of Sacks, …) leaked into the database. The scanner now indexes **only containers whose title exactly matches a vanilla storage name** (Chest / Large Chest / Barrel / Shulker Box, localized). Menus never match. |
+| **DB cleanup** | Startup purge extended to the newly-blocked menu titles (loadouts, sacks, backpacks, storage, sell dialogs) — existing junk rows are removed automatically |
+
+---
+
 ## [1.2.0] — 2026-07-18
 
 **Supported Minecraft versions / Поддерживаемые версии:**

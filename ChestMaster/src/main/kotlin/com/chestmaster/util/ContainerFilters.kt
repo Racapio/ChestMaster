@@ -4,8 +4,11 @@ import java.util.Locale
 
 /**
  * Shared block-list of container titles that must never be indexed.
- * Used by the scanner (to skip them) and by DatabaseManager (to purge
- * rows saved by older versions that lacked these filters).
+ *
+ * The scanner's primary filter is now a strict whitelist of vanilla storage names
+ * (see ChestScanner) — this block-list is a secondary guard, and its main job is to
+ * let DatabaseManager purge rows saved by older versions whose title-based filtering
+ * was too permissive (menus opened while facing a chest slipped through).
  */
 object ContainerFilters {
     // Substring matches against the lowercased container title.
@@ -23,6 +26,13 @@ object ContainerFilters {
         "profile",
         "bank",
         "dungeon",
+        "loadout",
+        "sack",
+        "backpack",
+        "storage",
+        // Auction "create/sell" dialogs — "At what price are you selling?"
+        "selling",
+        "how long",
         // Hypixel sub-menu arrow — e.g. "Farming ➜ Nether Warts", "X ➜ Instant Buy"
         "➜",
         // Bazaar confirm dialogs — "Confirm Sell Offer", "Confirm Instant Buy", ...

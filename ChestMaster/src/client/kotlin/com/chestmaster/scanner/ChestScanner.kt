@@ -56,11 +56,32 @@ object ChestScanner {
     private const val CHEST_SEARCH_RADIUS_XZ = 6
     private const val CHEST_SEARCH_RADIUS_Y = 4
 
-    // Blocked titles (menus, reward chests, ender chest) live in ContainerFilters —
-    // shared with DatabaseManager so old rows are purged with the same rules.
-    private val allowedChestTitleKeywords = listOf(
-        "chest"
+    // Only real storage containers keep their vanilla localized title on Hypixel
+    // ("Large Chest" / "Большой сундук"); every server menu (loadouts, auction
+    // dialogs, sacks, bazaar, …) uses a custom title. We therefore whitelist by
+    // exact vanilla name instead of trusting the crosshair, which falsely matched
+    // any menu opened while facing a chest.
+    private val vanillaStorageTranslationKeys = listOf(
+        "container.chest",
+        "container.chestDouble",
+        "container.barrel",
+        "container.shulkerBox"
     )
+
+    // Vanilla names resolve against the client language; cache them and refresh if the
+    // resolved set changes (e.g. the player switches language mid-session).
+    @Volatile
+    private var cachedVanillaStorageTitles: Set<String> = emptySet()
+
+    private fun vanillaStorageTitles(): Set<String> {
+        val resolved = vanillaStorageTranslationKeys
+            .map { net.minecraft.network.chat.Component.translatable(it).string.trim().lowercase() }
+            .filterTo(HashSet()) { it.isNotBlank() }
+        if (resolved != cachedVanillaStorageTitles && resolved.isNotEmpty()) {
+            cachedVanillaStorageTitles = resolved
+        }
+        return if (resolved.isNotEmpty()) resolved else cachedVanillaStorageTitles
+    }
 
     fun isAutoScanEnabled(): Boolean = autoScanEnabled
     fun isScanPending(): Boolean = pendingScan != null
@@ -87,24 +108,24 @@ object ChestScanner {
         if (!autoScanEnabled) return
 
         val title = screen.title.string
-        val focusedChestPos = resolveFocusedStoragePos()
-        if (!isScannableContainerTitle(title, focusedChestPos)) {
+        if (!isScannableContainerTitle(title)) {
             if (ChestMasterMod.isVerboseLogging()) {
                 ChestMasterMod.LOGGER.debug("Skipped non-chest container: $title")
             }
             return
         }
 
+        val focusedChestPos = resolveFocusedStoragePos()
         scheduleScan(screen, handler, allowDuplicateGuard = true, chestPosHint = focusedChestPos)
     }
 
     fun scanNow(screen: AbstractContainerScreen<*>, handler: ChestMenu): Int {
         val title = screen.title.string
-        val focusedChestPos = resolveFocusedStoragePos()
-        if (!isScannableContainerTitle(title, focusedChestPos)) {
+        if (!isScannableContainerTitle(title)) {
             return 0
         }
 
+        val focusedChestPos = resolveFocusedStoragePos()
         val scanned = scanInternal(
             screen = screen,
             handler = handler,
@@ -127,7 +148,7 @@ object ChestScanner {
     }
 
     fun canScanCurrentScreen(screenTitle: String): Boolean {
-        return isScannableContainerTitle(screenTitle, resolveFocusedStoragePos())
+        return isScannableContainerTitle(screenTitle)
     }
 
     fun onClientTick(client: Minecraft) {
@@ -371,16 +392,16 @@ object ChestScanner {
         }
     }
 
-    private fun isScannableContainerTitle(title: String, focusedStoragePos: BlockPos?): Boolean {
+    private fun isScannableContainerTitle(title: String): Boolean {
         if (ContainerFilters.isBlockedTitle(title)) {
             return false
         }
-        val normalized = title.lowercase()
-        if (allowedChestTitleKeywords.any { normalized.contains(it) }) {
-            return true
-        }
-        // Allow custom chest names when the looked-at block is real storage.
-        return focusedStoragePos != null
+        // Strict whitelist: the title must be exactly a vanilla storage name.
+        // This is the only reliable signal on Hypixel, where real chests keep their
+        // vanilla name and every menu (loadouts, auction/sell dialogs, sacks, …) is
+        // a custom-titled ChestMenu that would otherwise slip through.
+        val normalized = title.trim().lowercase()
+        return normalized in vanillaStorageTitles()
     }
 
     private fun isStorageBlockId(blockId: String): Boolean {

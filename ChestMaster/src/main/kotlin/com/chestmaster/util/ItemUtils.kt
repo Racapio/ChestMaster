@@ -200,7 +200,7 @@ object ItemUtils {
             }
             is net.minecraft.nbt.ListTag -> {
                 for (i in 0 until tag.size) {
-                    tag.get(i)?.let { appendComponentText(it, sb) }
+                    appendComponentText(tag.get(i), sb)
                 }
             }
             else -> tag.asString().orElse(null)?.let { sb.append(it) }
