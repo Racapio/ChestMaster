@@ -1,90 +1,69 @@
+/*
+ * Chest tracking approach ported from SkyOcean's ChestTracker
+ * (https://github.com/meowdding/SkyOcean, src/main/kotlin/me/owdding/skyocean/features/misc/ChestTracker.kt).
+ * Copyright (c) meowdding / SkyOcean contributors, MIT License — see THIRD_PARTY_NOTICES.md.
+ */
 package com.chestmaster.scanner
 
 import com.chestmaster.ChestMasterMod
-import com.chestmaster.compat.VersionHelper
 import com.chestmaster.database.ItemRecord
-import com.chestmaster.util.ContainerFilters
 import com.chestmaster.util.ItemUtils
 import com.chestmaster.util.WorldUtils
 import com.chestmaster.util.skyblockId
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
 import net.minecraft.core.BlockPos
-import net.minecraft.core.registries.BuiltInRegistries
+import net.minecraft.core.Direction
+import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.MutableComponent
+import net.minecraft.network.chat.contents.TranslatableContents
+import net.minecraft.world.entity.player.Inventory
 import net.minecraft.world.inventory.ChestMenu
+import net.minecraft.world.inventory.Slot
 import net.minecraft.world.level.block.ChestBlock
+import net.minecraft.world.level.block.state.BlockState
+import net.minecraft.world.level.block.state.properties.BlockStateProperties
 import net.minecraft.world.level.block.state.properties.ChestType
-import net.minecraft.world.phys.BlockHitResult
+import tech.thatgravyboat.skyblockapi.api.SkyBlockAPI
+import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
+import tech.thatgravyboat.skyblockapi.api.events.level.BlockChangeEvent
+import tech.thatgravyboat.skyblockapi.api.events.level.RightClickBlockEvent
+import tech.thatgravyboat.skyblockapi.api.events.screen.ContainerCloseEvent
+import tech.thatgravyboat.skyblockapi.api.events.screen.InventoryChangeEvent
+import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
+import tech.thatgravyboat.skyblockapi.api.location.SkyBlockIsland
 
+/**
+ * Indexes the contents of chests on the player's Private Island.
+ *
+ * How a chest is recognised and located (the source of every earlier bug):
+ *  - position comes from the right-click on the block itself, not from the crosshair
+ *    or a radius search — so the stored coordinates are exact;
+ *  - a container counts as a chest only when its title is the vanilla *translation key*
+ *    `container.chest` / `container.chestDouble`. Hypixel menus (loadouts, sell dialogs,
+ *    sacks, bazaar…) send plain-text titles, so they can never match — in any language;
+ *  - contents are saved when the container closes, when everything has been received,
+ *    instead of polling for a few ticks after opening;
+ *  - each half of a double chest stores the items that are physically in it;
+ *  - breaking a chest removes its items from the database.
+ */
 object ChestScanner {
-    private data class PendingScan(
-        val screen: AbstractContainerScreen<*>,
-        val handler: ChestMenu,
-        val title: String,
-        val chestPos: BlockPos?,
-        val serverKey: String,
-        var ticksUntilAttempt: Int,
-        var attemptsLeft: Int
-    )
+    private var first: BlockPos? = null
+    private var second: BlockPos? = null
+    private var trackedSlots: List<Slot>? = null
+    private var trackedTitle: String = ""
 
     @Volatile
     private var autoScanEnabled = false
 
-    @Volatile
-    private var lastScanKey = ""
-
-    @Volatile
-    private var lastScanTimeMs = 0L
-
-    // All access to pendingScan is from the client tick thread, so @Volatile is sufficient.
-    @Volatile
-    private var pendingScan: PendingScan? = null
-
-    // Cache the resolved chest position for up to 1 second to avoid re-scanning 1521 blocks
-    // on every retry tick.
-    @Volatile
-    private var cachedChestPos: BlockPos? = null
-
-    @Volatile
-    private var cachedChestPosTimestampMs = 0L
-
-    private const val CHEST_POS_CACHE_MS = 1000L
-    private const val DUPLICATE_SCAN_WINDOW_MS = 1000L
-    private const val INITIAL_SCAN_DELAY_TICKS = 6
-    private const val RETRY_DELAY_TICKS = 3
-    private const val MAX_SCAN_ATTEMPTS = 12
-    private const val CHEST_SEARCH_RADIUS_XZ = 6
-    private const val CHEST_SEARCH_RADIUS_Y = 4
-
-    // Only real storage containers keep their vanilla localized title on Hypixel
-    // ("Large Chest" / "Большой сундук"); every server menu (loadouts, auction
-    // dialogs, sacks, bazaar, …) uses a custom title. We therefore whitelist by
-    // exact vanilla name instead of trusting the crosshair, which falsely matched
-    // any menu opened while facing a chest.
-    private val vanillaStorageTranslationKeys = listOf(
-        "container.chest",
-        "container.chestDouble",
-        "container.barrel",
-        "container.shulkerBox"
-    )
-
-    // Vanilla names resolve against the client language; cache them and refresh if the
-    // resolved set changes (e.g. the player switches language mid-session).
-    @Volatile
-    private var cachedVanillaStorageTitles: Set<String> = emptySet()
-
-    private fun vanillaStorageTitles(): Set<String> {
-        val resolved = vanillaStorageTranslationKeys
-            .map { net.minecraft.network.chat.Component.translatable(it).string.trim().lowercase() }
-            .filterTo(HashSet()) { it.isNotBlank() }
-        if (resolved != cachedVanillaStorageTitles && resolved.isNotEmpty()) {
-            cachedVanillaStorageTitles = resolved
-        }
-        return if (resolved.isNotEmpty()) resolved else cachedVanillaStorageTitles
+    fun init() {
+        SkyBlockAPI.eventBus.register(this)
     }
 
     fun isAutoScanEnabled(): Boolean = autoScanEnabled
-    fun isScanPending(): Boolean = pendingScan != null
+
+    /** Saving now happens synchronously on close, so nothing is ever "pending". */
+    fun isScanPending(): Boolean = false
 
     fun enableAutoScan(): Boolean {
         if (autoScanEnabled) return false
@@ -95,318 +74,157 @@ object ChestScanner {
     fun disableAutoScan(): Boolean {
         if (!autoScanEnabled) return false
         autoScanEnabled = false
-        pendingScan = null
+        reset()
         return true
     }
 
     fun setAutoScanEnabled(enabled: Boolean) {
         autoScanEnabled = enabled
-        if (!enabled) pendingScan = null
+        if (!enabled) reset()
     }
 
-    fun onScreenOpen(screen: AbstractContainerScreen<*>, handler: ChestMenu) {
-        if (!autoScanEnabled) return
+    private fun isTrackingAllowed(): Boolean =
+        autoScanEnabled && SkyBlockIsland.PRIVATE_ISLAND.inIsland() && !LocationAPI.isGuest
 
-        val title = screen.title.string
-        if (!isScannableContainerTitle(title)) {
-            if (ChestMasterMod.isVerboseLogging()) {
-                ChestMasterMod.LOGGER.debug("Skipped non-chest container: $title")
+    @Subscription
+    fun onRightClickBlock(event: RightClickBlockEvent) {
+        if (!isTrackingAllowed()) return
+        val level = Minecraft.getInstance().level ?: return
+        val state = level.getBlockState(event.pos)
+        if (state.block !is ChestBlock) return
+
+        val pos = event.pos.immutable()
+        first = pos
+        second = null
+
+        val chestType = state.getValue(BlockStateProperties.CHEST_TYPE)
+        if (chestType == ChestType.SINGLE) return
+
+        // In a double chest the top 27 slots belong to the RIGHT half (the "first" block).
+        val other = pos.relative(ChestBlock.getConnectedDirection(state)).immutable()
+        if (chestType == ChestType.RIGHT) {
+            second = other
+        } else {
+            first = other
+            second = pos
+        }
+    }
+
+    @Subscription
+    fun onInventoryChange(event: InventoryChangeEvent) {
+        if (!isTrackingAllowed() || first == null) return
+        if (!isChestTitle(event.titleComponent)) return
+        trackedSlots = event.inventory
+        trackedTitle = event.title
+    }
+
+    @Subscription(event = [ContainerCloseEvent::class])
+    fun onContainerClose() {
+        saveTracked()
+        reset()
+    }
+
+    @Subscription
+    fun onBlockChange(event: BlockChangeEvent) {
+        if (!SkyBlockIsland.PRIVATE_ISLAND.inIsland() || LocationAPI.isGuest) return
+        val level = Minecraft.getInstance().level ?: return
+        // The event fires before the change is applied: the level still holds the old state.
+        if (level.getBlockState(event.pos).isChest() && !event.state.isChest()) {
+            val serverKey = WorldUtils.getCurrentServerKey()
+            val pos = event.pos.immutable()
+            ChestMasterMod.dbExecutor.execute {
+                runCatching { ChestMasterMod.db.deleteChests(listOf(pos), serverKey) }
+                    .onFailure { ChestMasterMod.LOGGER.error("Failed to remove broken chest at $pos", it) }
             }
-            return
         }
-
-        val focusedChestPos = resolveFocusedStoragePos()
-        scheduleScan(screen, handler, allowDuplicateGuard = true, chestPosHint = focusedChestPos)
     }
 
+    /**
+     * Manual `/cm now`: saves the currently open chest immediately (it is saved again on close).
+     * Only works for a chest that was opened by right-clicking it on the Private Island.
+     */
     fun scanNow(screen: AbstractContainerScreen<*>, handler: ChestMenu): Int {
-        val title = screen.title.string
-        if (!isScannableContainerTitle(title)) {
-            return 0
-        }
+        if (first == null || !isChestTitle(screen.title)) return 0
+        trackedSlots = handler.slots
+        trackedTitle = screen.title.string
+        return saveTracked()
+    }
 
-        val focusedChestPos = resolveFocusedStoragePos()
-        val scanned = scanInternal(
-            screen = screen,
-            handler = handler,
-            deduplicate = false,
-            forcedChestPos = focusedChestPos ?: resolveCurrentChestPos()
-        )
+    fun canScanScreen(screen: AbstractContainerScreen<*>): Boolean = isChestTitle(screen.title)
 
-        if (scanned == 0) {
-            // On Hypixel, container content can arrive a few ticks after opening.
-            scheduleScan(
-                screen,
-                handler,
-                allowDuplicateGuard = false,
-                initialDelay = 2,
-                chestPosHint = focusedChestPos
+    /** Kept for API compatibility with the tick loop; tracking is fully event-driven now. */
+    @Suppress("UNUSED_PARAMETER")
+    fun onClientTick(client: Minecraft) = Unit
+
+    private fun saveTracked(): Int {
+        val slots = trackedSlots ?: return 0
+        val firstPos = first ?: return 0
+        val secondPos = second
+        val serverKey = WorldUtils.getCurrentServerKey()
+        val scanTime = System.currentTimeMillis()
+
+        val records = mutableListOf<ItemRecord>()
+        for (slot in slots) {
+            if (slot.container is Inventory) continue // player inventory part of the menu
+            val stack = slot.item
+            if (stack.isEmpty) continue
+
+            val pos = when {
+                slot.index < 27 -> firstPos
+                secondPos != null -> secondPos
+                else -> {
+                    ChestMasterMod.LOGGER.warn("Item in slot ${slot.index} has no chest half at $firstPos")
+                    continue
+                }
+            }
+
+            val baseItemId = ItemUtils.getItemId(stack)
+            val nbt = ItemUtils.getNbtString(stack)
+            val skyblockId = ItemUtils.normalizeSkyblockId(stack.skyblockId)
+                ?: ItemUtils.extractSkyblockIdFromNbtString(nbt)
+                ?: baseItemId
+            records += ItemRecord(
+                id = 0,
+                itemId = skyblockId,
+                baseItemId = baseItemId,
+                displayName = ItemUtils.getDisplayName(stack),
+                itemNbt = nbt,
+                count = stack.count,
+                chestX = pos.x,
+                chestY = pos.y,
+                chestZ = pos.z,
+                label = trackedTitle,
+                serverKey = serverKey,
+                lastSeen = scanTime
             )
         }
 
-        return scanned
-    }
-
-    fun canScanCurrentScreen(screenTitle: String): Boolean {
-        return isScannableContainerTitle(screenTitle)
-    }
-
-    fun onClientTick(client: Minecraft) {
-        val task = pendingScan ?: return
-
-        val current = VersionHelper.currentScreen(client)
-        if (current !== task.screen) {
-            pendingScan = null
-            return
-        }
-
-        val currentMenu = task.screen.menu
-        if (currentMenu !== task.handler) {
-            pendingScan = null
-            return
-        }
-
-        if (task.ticksUntilAttempt > 0) {
-            task.ticksUntilAttempt -= 1
-            return
-        }
-
-        val scanned = scanInternal(
-            screen = task.screen,
-            handler = task.handler,
-            deduplicate = false,
-            forcedChestPos = task.chestPos,
-            serverKeyOverride = task.serverKey
-        )
-        if (scanned > 0) {
-            pendingScan = null
-            return
-        }
-
-        task.attemptsLeft -= 1
-        if (task.attemptsLeft <= 0) {
-            if (ChestMasterMod.isVerboseLogging()) {
-                ChestMasterMod.LOGGER.debug("No items detected after delayed retries for chest: ${task.title}")
-            }
-            pendingScan = null
-            return
-        }
-
-        task.ticksUntilAttempt = RETRY_DELAY_TICKS
-    }
-
-    private fun scheduleScan(
-        screen: AbstractContainerScreen<*>,
-        handler: ChestMenu,
-        allowDuplicateGuard: Boolean,
-        initialDelay: Int = INITIAL_SCAN_DELAY_TICKS,
-        chestPosHint: BlockPos? = null
-    ) {
-        val title = screen.title.string
-        val normalizedPos = normalizeStoragePos(chestPosHint ?: resolveCurrentChestPos())
-        val posKey = normalizedPos?.let { "${it.x},${it.y},${it.z}" } ?: "unknown"
-        val scanKey = "$posKey:$title:${handler.rowCount}"
-        val now = System.currentTimeMillis()
-
-        if (allowDuplicateGuard && scanKey == lastScanKey && now - lastScanTimeMs < DUPLICATE_SCAN_WINDOW_MS) {
-            return
-        }
-
-        if (allowDuplicateGuard) {
-            lastScanKey = scanKey
-            lastScanTimeMs = now
-        }
-
-        pendingScan = PendingScan(
-            screen = screen,
-            handler = handler,
-            title = title,
-            chestPos = normalizedPos,
-            serverKey = WorldUtils.getCurrentServerKey(),
-            ticksUntilAttempt = initialDelay.coerceAtLeast(0),
-            attemptsLeft = MAX_SCAN_ATTEMPTS
-        )
-    }
-
-    private fun scanInternal(
-        screen: AbstractContainerScreen<*>,
-        handler: ChestMenu,
-        deduplicate: Boolean,
-        forcedChestPos: BlockPos? = null,
-        serverKeyOverride: String? = null
-    ): Int {
-        val title = screen.title.string
-        val now = System.currentTimeMillis()
-        val normalizedPos = normalizeStoragePos(forcedChestPos ?: resolveCurrentChestPos())
-        val posKey = normalizedPos?.let { "${it.x},${it.y},${it.z}" } ?: "unknown"
-        val scanKey = "$posKey:$title:${handler.rowCount}"
-
-        if (deduplicate && scanKey == lastScanKey && now - lastScanTimeMs < DUPLICATE_SCAN_WINDOW_MS) {
-            return 0
-        }
-
-        lastScanKey = scanKey
-        lastScanTimeMs = now
-
-        val pos = normalizedPos ?: BlockPos(0, 0, 0)
-        if (pos.x == 0 && pos.y == 0 && pos.z == 0 && ChestMasterMod.isVerboseLogging()) {
-            ChestMasterMod.LOGGER.debug("Chest position could not be resolved for '$title'; using legacy 0,0,0.")
-        }
-
-        val serverKey = serverKeyOverride ?: WorldUtils.getCurrentServerKey()
-        val scanTime = System.currentTimeMillis()
-        val itemsToSave = mutableListOf<ItemRecord>()
-        val rows = handler.rowCount
-        val chestSize = rows * 9
-        for (i in 0 until chestSize) {
-            val slot = handler.getSlot(i)
-            val stack = slot.item
-            if (!stack.isEmpty) {
-                val baseItemId = ItemUtils.getItemId(stack)
-                val nbt = ItemUtils.getNbtString(stack)
-                val normalizedSkyblockId = ItemUtils.normalizeSkyblockId(stack.skyblockId)
-                    ?: ItemUtils.extractSkyblockIdFromNbtString(nbt)
-                    ?: baseItemId
-                val displayName = ItemUtils.getDisplayName(stack)
-                itemsToSave.add(
-                    ItemRecord(
-                        id = 0,
-                        itemId = normalizedSkyblockId,
-                        baseItemId = baseItemId,
-                        displayName = displayName,
-                        itemNbt = nbt,
-                        count = stack.count,
-                        chestX = pos.x,
-                        chestY = pos.y,
-                        chestZ = pos.z,
-                        label = title,
-                        serverKey = serverKey,
-                        lastSeen = scanTime
-                    )
-                )
-            }
-        }
-
-        if (itemsToSave.isEmpty()) return 0
-
+        // Replace both halves even when empty, so taken-out items disappear from the index.
+        val positions = listOfNotNull(firstPos, secondPos)
         ChestMasterMod.dbExecutor.execute {
             try {
-                ChestMasterMod.db.saveItems(itemsToSave)
+                ChestMasterMod.db.replaceChests(positions, serverKey, records)
                 if (ChestMasterMod.isVerboseLogging()) {
-                    ChestMasterMod.LOGGER.debug("Saved ${itemsToSave.size} items from $title")
+                    ChestMasterMod.LOGGER.debug("Saved ${records.size} items from chest at $positions")
                 }
             } catch (e: Exception) {
-                ChestMasterMod.LOGGER.error("Failed to save items to database", e)
+                ChestMasterMod.LOGGER.error("Failed to save chest contents", e)
             }
         }
-
-        return itemsToSave.size
+        return records.size
     }
 
-    private fun resolveCurrentChestPos(): BlockPos? {
-        val client = Minecraft.getInstance()
-        val level = client.level ?: return null
-        val player = client.player ?: return null
-
-        resolveFocusedStoragePos()?.let { return it }
-
-        // Return the cached position if it is still fresh.
-        val now = System.currentTimeMillis()
-        if (now - cachedChestPosTimestampMs < CHEST_POS_CACHE_MS) {
-            return cachedChestPos
-        }
-
-        val center = player.blockPosition()
-        var nearest: BlockPos? = null
-        var nearestDist = Double.MAX_VALUE
-
-        for (x in (center.x - CHEST_SEARCH_RADIUS_XZ)..(center.x + CHEST_SEARCH_RADIUS_XZ)) {
-            for (y in (center.y - CHEST_SEARCH_RADIUS_Y)..(center.y + CHEST_SEARCH_RADIUS_Y)) {
-                for (z in (center.z - CHEST_SEARCH_RADIUS_XZ)..(center.z + CHEST_SEARCH_RADIUS_XZ)) {
-                    val pos = BlockPos(x, y, z)
-                    val blockId = BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).block).toString()
-                    if (!isStorageBlockId(blockId)) continue
-
-                    val distance = pos.distToCenterSqr(player.position())
-                    if (distance < nearestDist) {
-                        nearestDist = distance
-                        nearest = pos.immutable()
-                    }
-                }
-            }
-        }
-
-        val result = normalizeStoragePos(nearest)
-        cachedChestPos = result
-        cachedChestPosTimestampMs = now
-        return result
+    private fun reset() {
+        first = null
+        second = null
+        trackedSlots = null
+        trackedTitle = ""
     }
 
-    private fun resolveFocusedStoragePos(): BlockPos? {
-        val client = Minecraft.getInstance()
-        val level = client.level ?: return null
-
-        val hitResult = client.hitResult
-        if (hitResult is BlockHitResult) {
-            val hitPos = hitResult.blockPos
-            val blockId = BuiltInRegistries.BLOCK.getKey(level.getBlockState(hitPos).block).toString()
-            if (isStorageBlockId(blockId)) {
-                return normalizeStoragePos(hitPos)
-            }
-        }
-
-        return null
+    private fun isChestTitle(title: Component): Boolean {
+        val contents = (title as? MutableComponent)?.contents as? TranslatableContents ?: return false
+        return contents.key.startsWith("container.chest")
     }
 
-    private fun normalizeStoragePos(rawPos: BlockPos?): BlockPos? {
-        if (rawPos == null) return null
-
-        val client = Minecraft.getInstance()
-        val level = client.level ?: return rawPos.immutable()
-        val state = level.getBlockState(rawPos)
-
-        if (state.block !is ChestBlock) {
-            return rawPos.immutable()
-        }
-
-        val chestType = state.getValue(ChestBlock.TYPE)
-        if (chestType == ChestType.SINGLE) {
-            return rawPos.immutable()
-        }
-
-        val connectedDirection = ChestBlock.getConnectedDirection(state)
-        val connectedPos = rawPos.relative(connectedDirection)
-        val connectedState = level.getBlockState(connectedPos)
-        if (connectedState.block !is ChestBlock) {
-            return rawPos.immutable()
-        }
-
-        return minBlockPos(rawPos, connectedPos)
-    }
-
-    private fun minBlockPos(a: BlockPos, b: BlockPos): BlockPos {
-        return when {
-            a.x != b.x -> if (a.x < b.x) a.immutable() else b.immutable()
-            a.y != b.y -> if (a.y < b.y) a.immutable() else b.immutable()
-            else -> if (a.z <= b.z) a.immutable() else b.immutable()
-        }
-    }
-
-    private fun isScannableContainerTitle(title: String): Boolean {
-        if (ContainerFilters.isBlockedTitle(title)) {
-            return false
-        }
-        // Strict whitelist: the title must be exactly a vanilla storage name.
-        // This is the only reliable signal on Hypixel, where real chests keep their
-        // vanilla name and every menu (loadouts, auction/sell dialogs, sacks, …) is
-        // a custom-titled ChestMenu that would otherwise slip through.
-        val normalized = title.trim().lowercase()
-        return normalized in vanillaStorageTitles()
-    }
-
-    private fun isStorageBlockId(blockId: String): Boolean {
-        return blockId.contains("chest") ||
-            blockId.contains("barrel") ||
-            blockId.contains("shulker_box")
-    }
+    private fun BlockState.isChest(): Boolean = block is ChestBlock
 }

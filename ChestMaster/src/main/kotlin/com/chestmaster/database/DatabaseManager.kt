@@ -232,6 +232,75 @@ class DatabaseManager {
         }
     }
 
+    /**
+     * Replaces everything stored at [positions] with [items] in one transaction.
+     * Unlike [saveItems], positions are cleared even when they end up empty, so items
+     * taken out of a chest (or a now-empty half of a double chest) leave the index.
+     */
+    @Synchronized
+    fun replaceChests(positions: List<net.minecraft.core.BlockPos>, serverKey: String, items: List<ItemRecord>) {
+        val conn = connection ?: return
+        val previousAutoCommit = conn.autoCommit
+        conn.autoCommit = false
+        try {
+            deleteChestsInternal(conn, positions, serverKey)
+            if (items.isNotEmpty()) insertItems(conn, items)
+            conn.commit()
+        } catch (e: Exception) {
+            runCatching { conn.rollback() }
+            throw e
+        } finally {
+            runCatching { conn.autoCommit = previousAutoCommit }
+        }
+    }
+
+    /** Removes all items stored at [positions] (e.g. the chest block was broken). */
+    @Synchronized
+    fun deleteChests(positions: List<net.minecraft.core.BlockPos>, serverKey: String) {
+        val conn = connection ?: return
+        deleteChestsInternal(conn, positions, serverKey)
+    }
+
+    private fun deleteChestsInternal(conn: Connection, positions: List<net.minecraft.core.BlockPos>, serverKey: String) {
+        conn.prepareStatement(
+            "DELETE FROM items WHERE chestX = ? AND chestY = ? AND chestZ = ? AND serverKey = ?"
+        ).use { stmt ->
+            for (pos in positions) {
+                stmt.setInt(1, pos.x)
+                stmt.setInt(2, pos.y)
+                stmt.setInt(3, pos.z)
+                stmt.setString(4, serverKey)
+                stmt.executeUpdate()
+            }
+        }
+    }
+
+    private fun insertItems(conn: Connection, items: List<ItemRecord>) {
+        conn.prepareStatement(
+            """
+            INSERT INTO items
+              (itemId, baseItemId, displayName, itemNbt, count, chestX, chestY, chestZ, label, serverKey, lastSeen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent()
+        ).use { stmt ->
+            for (item in items) {
+                stmt.setString(1, item.itemId)
+                stmt.setString(2, item.baseItemId)
+                stmt.setString(3, item.displayName)
+                stmt.setString(4, item.itemNbt)
+                stmt.setInt(5, item.count)
+                stmt.setInt(6, item.chestX)
+                stmt.setInt(7, item.chestY)
+                stmt.setInt(8, item.chestZ)
+                stmt.setString(9, item.label)
+                stmt.setString(10, item.serverKey)
+                stmt.setLong(11, item.lastSeen)
+                stmt.addBatch()
+            }
+            stmt.executeBatch()
+        }
+    }
+
     @Synchronized
     fun searchItems(query: String, serverKey: String? = null): List<ItemRecord> {
         val results = mutableListOf<ItemRecord>()

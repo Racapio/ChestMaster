@@ -5,7 +5,9 @@ import com.chestmaster.command.ChestMasterCommand
 import com.chestmaster.compat.VersionHelper
 import com.chestmaster.gui.ChestMasterScreen
 import com.chestmaster.highlight.ChestLocationHighlighter
+import com.chestmaster.highlight.SearchHighlight
 import com.chestmaster.scanner.ChestScanner
+import com.chestmaster.search.HoverSearch
 import com.chestmaster.valuation.ItemValuator
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
@@ -31,6 +33,13 @@ class chestmasterClient : ClientModInitializer {
             )
         )
 
+        // SkyBlockAPI-driven features: chest tracking, in-inventory highlight, hover search.
+        ChestScanner.init()
+        SearchHighlight.init()
+        HoverSearch.init(openGuiKey) { query ->
+            VersionHelper.setScreen(net.minecraft.client.Minecraft.getInstance(), ChestMasterScreen(query))
+        }
+
         // Register commands only on the client side.
         ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
             ChestMasterCommand.register(dispatcher)
@@ -46,6 +55,7 @@ class chestmasterClient : ClientModInitializer {
             ChestMasterCommand.onClientTick(client)
             ChestScanner.onClientTick(client)
             ChestLocationHighlighter.onClientTick(client)
+            SearchHighlight.onClientTick()
 
             // Check the GUI hotkey each tick.
             while (openGuiKey.consumeClick()) {

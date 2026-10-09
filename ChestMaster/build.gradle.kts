@@ -94,6 +94,11 @@ repositories {
     mavenCentral()
     maven { url = uri("https://maven.fabricmc.net/") }
     maven { url = uri("https://maven.terraformersmc.com/releases/") }
+    // SkyBlockAPI
+    maven {
+        url = uri("https://maven.teamresourceful.com/repository/maven-public/")
+        content { includeGroupAndSubgroups("tech.thatgravyboat") }
+    }
 }
 
 dependencies {
@@ -110,6 +115,23 @@ dependencies {
 
     // Mod Menu: compile against the API only; not bundled in the jar.
     compileOnly("com.terraformersmc:modmenu:${prop("modmenu_version")}")
+
+    // SkyBlockAPI is bundled (jar-in-jar), like SkyOcean/Catharsis do: it is not published
+    // as a standalone mod, so players couldn't install it themselves. Its jar already nests
+    // its own runtime deps (Hypixel Mod API, repo-lib, item-data-fixer). If several mods
+    // bundle it, Fabric loads only the newest copy.
+    // The artifact publishes one variant per MC version, selected by capability.
+    val sbapi = "tech.thatgravyboat:skyblock-api:${prop("sbapi_version")}"
+    val sbapiCapability = "tech.thatgravyboat:skyblock-api-${prop("sbapi_mc")}"
+    compileOnly(sbapi) {
+        capabilities { requireCapability(sbapiCapability) }
+        // Its published metadata leaks dev-only deps (DevAuth, ...); we only need the API.
+        isTransitive = false
+    }
+    include(sbapi) {
+        capabilities { requireCapability(sbapiCapability) }
+        isTransitive = false
+    }
 }
 
 tasks.processResources {

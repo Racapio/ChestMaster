@@ -296,8 +296,8 @@ object ChestMasterCommand {
             return 0
         }
 
-        if (!ChestScanner.canScanCurrentScreen(screen.title.string)) {
-            source.sendError(Component.literal("This container is not recognized as a chest inventory."))
+        if (!ChestScanner.canScanScreen(screen)) {
+            source.sendError(Component.literal("This container is not a real chest (menus are never indexed)."))
             return 0
         }
 
@@ -305,12 +305,12 @@ object ChestMasterCommand {
         if (scanned > 0) {
             source.sendFeedback(Component.literal("Scanned $scanned items."))
         } else {
-            val message = if (ChestScanner.isScanPending()) {
-                "No items yet. Retrying scan for a short time..."
-            } else {
-                "Chest scanned, no items found."
-            }
-            source.sendFeedback(Component.literal(message))
+            source.sendFeedback(
+                Component.literal(
+                    "Nothing saved. Chests are indexed only on your Private Island and only when opened " +
+                        "by right-clicking them (auto-scan must be on). They are also saved when you close them."
+                )
+            )
         }
         return 1
     }

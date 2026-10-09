@@ -29,12 +29,14 @@ class ChestMasterConfigScreen(private val parent: Screen?) : Screen(Component.li
     }
 
     private val intervalPresets = listOf(60, 120, 300, 600, 900, 1800)
+    private val highlightPresets = listOf(15, 30, 60, 120, 300, 0)
 
     private var autoScanButton: StyledButton? = null
     private var verboseButton: StyledButton? = null
     private var sortButton: StyledButton? = null
     private var priceModeButton: StyledButton? = null
     private var intervalButton: StyledButton? = null
+    private var highlightButton: StyledButton? = null
 
     private inner class StyledButton(
         x: Int,
@@ -133,6 +135,16 @@ class ChestMasterConfigScreen(private val parent: Screen?) : Screen(Component.li
             ChestMasterMod.configManager.save()
             intervalButton?.setMessage(Component.literal(intervalLabel()))
         }
+        y += step
+
+        highlightButton = addButton(x, y, buttonWidth, buttonHeight, highlightLabel()) {
+            val config = ChestMasterMod.configManager.config
+            val currentIndex = highlightPresets.indexOf(config.highlightSeconds)
+            val nextIndex = if (currentIndex < 0) 0 else (currentIndex + 1) % highlightPresets.size
+            config.highlightSeconds = highlightPresets[nextIndex]
+            ChestMasterMod.configManager.save()
+            highlightButton?.setMessage(Component.literal(highlightLabel()))
+        }
         y += step + 8
 
         addButton(x, y, buttonWidth, buttonHeight, "Done") { onClose() }
@@ -162,6 +174,16 @@ class ChestMasterConfigScreen(private val parent: Screen?) : Screen(Component.li
 
     private fun priceModeLabel(): String =
         "Price mode: ${ItemValuator.currentMode.label}"
+
+    private fun highlightLabel(): String {
+        val seconds = ChestMasterMod.configManager.config.highlightSeconds
+        val label = when {
+            seconds <= 0 -> "never"
+            seconds % 60 == 0 -> "${seconds / 60}m"
+            else -> "${seconds}s"
+        }
+        return "Clear highlights after: $label"
+    }
 
     private fun intervalLabel(): String {
         val seconds = ChestMasterMod.configManager.config.bazaarUpdateInterval

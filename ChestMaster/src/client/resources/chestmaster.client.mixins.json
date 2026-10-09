@@ -4,7 +4,7 @@
   "package": "com.chestmaster.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "GenericContainerScreenMixin"
+    "AbstractContainerScreenAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

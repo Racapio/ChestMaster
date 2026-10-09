@@ -3,10 +3,12 @@ package com.chestmaster.gui
 import com.chestmaster.ChestMasterMod
 import com.chestmaster.database.ItemRecord
 import com.chestmaster.highlight.ChestLocationHighlighter
+import com.chestmaster.highlight.SearchHighlight
 import com.chestmaster.scanner.ChestScanner
 import com.chestmaster.util.ItemUtils
 import com.chestmaster.util.WorldUtils
 import com.chestmaster.valuation.ItemValuator
+import com.chestmaster.valuation.SkyBlockValuation
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.components.AbstractWidget
@@ -22,7 +24,7 @@ import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 
-class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
+class ChestMasterScreen(private val initialQuery: String = "") : Screen(Component.literal("ChestMaster Explorer")) {
     private data class Layout(
         val listLeft: Int,
         val listTop: Int,
@@ -125,6 +127,12 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
     private var selectedItemKey: String? = null
     private var selectedItemName: String? = null
     private var selectedBreakdown: ItemValuator.PriceBreakdown? = null
+    private var selectedSbValue: SkyBlockValuation.Result? = null
+
+    // SkyBlockAPI valuation per record. Nulls (not priceable yet — e.g. SkyBlockAPI still
+    // loading its price data) are retried periodically instead of on every frame.
+    private val sbValueCache = HashMap<String, SkyBlockValuation.Result?>()
+    private var lastSbRetryMs = 0L
     private var selectedSource = ItemValuator.PriceSource.UNKNOWN
     private var selectedUnitPrice = 0.0
     private var selectedStackPrice = 0.0
@@ -198,7 +206,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
         val centerX = width / 2
 
         // init() re-runs on window resize; keep the current search query alive.
-        val previousQuery = searchField?.value ?: ""
+        val previousQuery = searchField?.value ?: initialQuery
 
         searchField = EditBox(
             font,
@@ -214,6 +222,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
 
         val refreshButton = createStyledButton(centerX + 136, 34, 74, 20, "Refresh") {
             priceCache.clear()
+            sbValueCache.clear()
             displayLabelCache.clear()
             itemNameColorCache.clear()
             sourceCache.clear()
@@ -228,6 +237,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
             ItemValuator.togglePriceMode()
             updateModeButtonLabel()
             priceCache.clear()
+            sbValueCache.clear()
             displayLabelCache.clear()
             itemNameColorCache.clear()
             applySortAndRecalculate()
@@ -362,6 +372,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
             selectedItemKey = null
             selectedItemName = null
             selectedBreakdown = null
+            selectedSbValue = null
             selectedSource = ItemValuator.PriceSource.UNKNOWN
             selectedUnitPrice = 0.0
             selectedStackPrice = 0.0
@@ -379,6 +390,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
         selectedUnitPrice = getCachedPrice(selected)
         selectedStackPrice = selectedUnitPrice * selected.count.toDouble()
         selectedBreakdown = ItemValuator.getPriceBreakdownFromNbt(selected.itemId, selected.itemNbt)
+        selectedSbValue = sbValue(selected)
         val serverKey = WorldUtils.getCurrentServerKey()
         selectedChestLocations = ChestMasterMod.db.findChestLocationsForItem(
             selected.itemId,
@@ -392,10 +404,34 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
         updateOpenMarketButton()
     }
 
+    private fun sbValue(record: ItemRecord): SkyBlockValuation.Result? {
+        val key = recordKey(record)
+        if (sbValueCache.containsKey(key)) return sbValueCache[key]
+        val value = runCatching { SkyBlockValuation.evaluate(record) }.getOrNull()
+        sbValueCache[key] = value
+        return value
+    }
+
+    /** Re-tries unpriced items every 15 s and re-sorts once something new got a price. */
+    private fun retryUnpricedSbValues() {
+        val now = System.currentTimeMillis()
+        if (now - lastSbRetryMs < 15_000L) return
+        lastSbRetryMs = now
+        val unpriced = sbValueCache.filterValues { it == null }.keys
+        if (unpriced.isEmpty()) return
+        unpriced.toList().forEach { sbValueCache.remove(it) }
+        if (sourceItems.any { recordKey(it) in unpriced && sbValue(it) != null }) {
+            priceCache.clear()
+            applySortAndRecalculate()
+        }
+    }
+
     private fun getCachedPrice(record: ItemRecord): Double {
         val cacheKey = "${record.itemId}@@${record.baseItemId}@@${record.itemNbt}"
         return priceCache.getOrPut(cacheKey) {
             try {
+                sbValue(record)?.let { return@getOrPut it.unitPrice }
+
                 val fromBreakdown = ItemValuator.getPriceFromNbt(record.itemId, record.itemNbt)
                 if (fromBreakdown >= 0.0) {
                     return@getOrPut fromBreakdown
@@ -696,6 +732,8 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
         selectedUnitPrice = getCachedPrice(record)
         selectedStackPrice = selectedUnitPrice * record.count.toDouble()
         selectedBreakdown = ItemValuator.getPriceBreakdownFromNbt(record.itemId, record.itemNbt)
+        selectedSbValue = sbValue(record)
+        SearchHighlight.set(record)
 
         val serverKey = WorldUtils.getCurrentServerKey()
         selectedChestLocations = ChestMasterMod.db.findChestLocationsForItem(
@@ -767,6 +805,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
     }
 
     override fun extractRenderState(guiGraphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, partialTick: Float) {
+        retryUnpricedSbValues()
         val loadedNow = ItemValuator.arePricesLoaded()
         val epochNow = ItemValuator.getDataEpoch()
         if (loadedNow != pricesWereLoaded || epochNow != lastSeenDataEpoch) {
@@ -774,6 +813,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
             lastSeenDataEpoch = epochNow
             if (loadedNow) {
                 priceCache.clear()
+                sbValueCache.clear()
                 sourceCache.clear()
                 refreshItems(searchField?.value ?: "")
             }
@@ -965,6 +1005,14 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
         lines += "Unit: ${ItemValuator.formatPrice(selectedUnitPrice)}" to 0xFFD5E6FF.toInt()
         lines += "Stack: ${ItemValuator.formatPrice(selectedStackPrice)}" to 0xFFD5E6FF.toInt()
         lines += "ID: ${breakdown.itemId}" to 0xFFABC1DD.toInt()
+        val sb = selectedSbValue
+        if (sb != null) {
+            lines += "Value breakdown:" to 0xFF8ED4FF.toInt()
+            for (line in sb.lines.take(10)) {
+                lines += " + ${line.label}: ${ItemValuator.formatPrice(line.value)}" to 0xFFBFD9F4.toInt()
+            }
+            lines += "Estimated Total: ${ItemValuator.formatPrice(sb.unitPrice)}" to 0xFFFFE08D.toInt()
+        } else {
         lines += "Base: ${ItemValuator.formatPrice(breakdown.basePrice)}" to 0xFFE2EBF8.toInt()
 
         if (breakdown.stars > 0 && breakdown.starBonus > 0.0) {
@@ -986,6 +1034,7 @@ class ChestMasterScreen : Screen(Component.literal("ChestMaster Explorer")) {
         }
 
         lines += "Estimated Total: ${ItemValuator.formatPrice(breakdown.totalPrice)}" to 0xFFFFE08D.toInt()
+        }
         lines += "Found in: $selectedChestCount chest(s)" to 0xFFA5BDD7.toInt()
 
         // Show up to 3 chest coordinates for quick reference.
