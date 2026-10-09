@@ -1,6 +1,7 @@
 package com.chestmaster.command
 
 import com.chestmaster.ChestMasterMod
+import com.chestmaster.compat.VersionHelper
 import com.chestmaster.gui.ChestMasterScreen
 import com.chestmaster.highlight.ChestLocationHighlighter
 import com.chestmaster.scanner.ChestScanner
@@ -31,7 +32,7 @@ object ChestMasterCommand {
 
         pendingGuiOpen = false
         runCatching {
-            client.setScreen(ChestMasterScreen())
+            VersionHelper.setScreen(client, ChestMasterScreen())
         }.onFailure { error ->
             ChestMasterMod.LOGGER.error("Failed to open ChestMaster GUI", error)
         }
@@ -115,8 +116,9 @@ object ChestMasterCommand {
             .then(
                 ClientCommands.literal("reload")
                     .executes { sourceContext ->
-                        ItemValuator.updateAllPrices()
-                        sourceContext.source.sendFeedback(Component.literal("Price reload started."))
+                        sourceContext.source.sendFeedback(
+                            Component.literal("Prices come from SkyBlockAPI and refresh automatically; reopen /cm to re-evaluate.")
+                        )
                         1
                     }
             )
@@ -283,7 +285,7 @@ object ChestMasterCommand {
 
     private fun scanNow(source: FabricClientCommandSource): Int {
         val client = source.client
-        val screen = client.screen
+        val screen = VersionHelper.currentScreen(client)
 
         if (screen !is AbstractContainerScreen<*>) {
             source.sendError(Component.literal("Open a chest and run /cm now or /cm s now."))

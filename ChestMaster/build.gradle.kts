@@ -145,6 +145,8 @@ tasks.processResources {
         )
     )
     filteringCharset = "UTF-8"
+    // MIT requires the third-party copyright notices to ship with the binary too.
+    from(rootProject.file("THIRD_PARTY_NOTICES.md")) { into("META-INF") }
     filesMatching("fabric.mod.json") {
         expand(
             "version"               to project.version,

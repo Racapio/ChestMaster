@@ -2,7 +2,6 @@ package com.chestmaster
 
 import com.chestmaster.config.ConfigManager
 import com.chestmaster.database.DatabaseManager
-import com.chestmaster.valuation.ItemValuator
 import net.fabricmc.api.ModInitializer
 import net.fabricmc.loader.api.FabricLoader
 import org.slf4j.Logger
@@ -29,9 +28,6 @@ class ChestMasterMod : ModInitializer {
 
     override fun onInitialize() {
         configManager.load()
-        ItemValuator.currentMode = runCatching {
-            ItemValuator.PriceMode.valueOf(configManager.config.priceMode)
-        }.getOrDefault(ItemValuator.PriceMode.SELL_OFFER)
         if (isVerboseLogging()) {
             val version = runCatching {
                 FabricLoader.getInstance()

@@ -9,24 +9,24 @@
 
 **Supported Minecraft versions / Поддерживаемые версии:** `26.1` – `26.1.2` · `26.2`
 
-> ℹ️ ChestMaster now builds on **[SkyBlockAPI](https://github.com/SkyblockAPI/SkyblockAPI)** (MIT), the library behind SkyOcean, Catharsis and SkyBlockPV.
-> It is **bundled inside the JAR** — nothing extra to install (it isn't published as a standalone mod). If another mod also bundles it, Fabric loads only the newest copy.
-> Встроена в мод, отдельно ставить ничего не нужно. Из-за этого JAR вырос до ~8.5 MB.
-
-Large parts of this release are ported from [SkyOcean](https://github.com/meowdding/SkyOcean) (MIT) — see `THIRD_PARTY_NOTICES.md`.
+> ℹ️ ChestMaster is now built on **[SkyBlockAPI](https://github.com/SkyblockAPI/SkyblockAPI)** (MIT) — the library used by many SkyBlock mods for location detection, events and market data.
+> It is **bundled inside the JAR**, nothing extra to install. If another mod bundles it too, Fabric loads only the newest copy.
+> Мод теперь работает на библиотеке SkyBlockAPI — она встроена, отдельно ставить ничего не нужно.
 
 ### 🔄 Reworked / Переработано
 
 | Change | Description |
 |---|---|
-| **New chest tracking** | Rewritten after SkyOcean's ChestTracker. The chest position comes from **right-clicking the block** (no more crosshair guessing or 1521-block radius search); a container counts as a chest only if its title is the vanilla **translation key** `container.chest*` — Hypixel menus send plain text and can never match, **in any language**; contents are saved **when the chest is closed** (no tick retries); each half of a double chest stores its own items; **breaking a chest removes it** from the database; tracking works **only on your Private Island** (not as a guest). |
-| **Item valuation** | Prices now come from **SkyBlockAPI's item value calculator** (the one SkyOcean uses): enchantments at any level (e.g. **Chimera V** = 16 × Chimera I — previously valued at 0), stars & master stars, gemstones, reforges, drill/rod parts, Necron scrolls, runes, dyes, skins, pets and more. The detail panel shows the breakdown by source. The old valuator stays as a fallback. |
+| **Chest tracking** | The chest position comes from **right-clicking the block** — exact coordinates, no crosshair guessing. A container counts as a chest only if its title is the vanilla **translation key** `container.chest*`, so Hypixel menus (Loadouts, sell dialogs, Sack of Sacks…) can never get in, **in any client language**. Contents are saved **when the chest is closed**; each half of a double chest stores its own items; **breaking a chest removes it** from the index; tracking works **only on your Private Island**. |
+| **Item valuation** | All prices now come from **SkyBlockAPI**: Bazaar, lowest-BIN and NPC data plus its item value calculator — enchantments at any level (e.g. **Chimera V** = 16 × Chimera I, previously 0), stars & master stars, gemstones, reforges, drill/rod parts, Necron scrolls, runes, dyes, skins, pets. The detail panel shows the breakdown by source. The Sell Offer / Buy Order switch still applies to Bazaar items. |
+| **Fast price loading** | ChestMaster no longer downloads any market data itself (the old Bazaar/LBIN/NPC/Coflnet loaders are gone) — prices appear as soon as SkyBlockAPI has its data, instead of "Loading..." for minutes on a slow connection. |
+| **Chest markers** | Selected chests are now drawn as a **translucent rainbow box visible through walls** with a bright outline; double chests light up as a whole. |
 
 ### 🆕 Added / Добавлено
 
 | Feature | Description |
 |---|---|
-| **In-inventory highlight** | Selecting an item in the GUI highlights every matching stack in any open inventory (chests, storage, your inventory), together with the in-world chest markers |
+| **In-inventory highlight** | Selecting an item in the GUI highlights every matching stack in any open inventory (chests, storage, your inventory) |
 | **Auto-clear highlights** | Highlights and chest markers clear themselves after a configurable time (Mod Menu → "Clear highlights after", default 1 min) |
 | **Search the hovered item** | Hover an item in any inventory and press the *Open ChestMaster* key — the GUI opens already searching for it |
 
@@ -34,14 +34,18 @@ Large parts of this release are ported from [SkyOcean](https://github.com/meowdd
 
 | Bug | Description |
 |---|---|
-| **Chimera and other high-level enchants valued at 0** | Bazaar only lists level-I books for many enchants; the new calculator derives higher levels correctly |
-| **Items taken out stayed in the index** | Saving now replaces the chest's contents completely, including emptied halves |
+| **Chimera and other high-level enchants valued at 0** | The Bazaar only lists level-I books for many enchants; higher levels are now derived correctly |
+| **Prices stuck on "Loading..."** | Per-item price requests could block the GUI for minutes on a bad connection |
+| **Items taken out stayed in the index** | Saving now replaces a chest's contents completely, including emptied halves |
 
 ### 🧹 Changed / Изменено
 
 | Change | Description |
 |---|---|
-| **JAR size 3.7 MB → 8.5 MB** | Due to the bundled SkyBlockAPI (with its own Hypixel Mod API, repo-lib, item-data-fixer) |
+| **Removed "Price refresh" setting** | SkyBlockAPI refreshes market data on its own |
+| **JAR size 3.7 MB → 8.5 MB** | Because SkyBlockAPI (with its Hypixel Mod API, repo-lib and item-data-fixer) is bundled |
+
+Credits: thanks to the [SkyOcean](https://github.com/meowdding/SkyOcean) project (MIT) — see `THIRD_PARTY_NOTICES.md`.
 
 ---
 

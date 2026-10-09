@@ -8,6 +8,7 @@ import com.chestmaster.highlight.ChestLocationHighlighter
 import com.chestmaster.highlight.SearchHighlight
 import com.chestmaster.scanner.ChestScanner
 import com.chestmaster.search.HoverSearch
+import com.chestmaster.valuation.AuctionDataFallback
 import com.chestmaster.valuation.ItemValuator
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
@@ -65,7 +66,9 @@ class chestmasterClient : ClientModInitializer {
             }
         }
 
-        // Start async market data loading for pricing.
-        ItemValuator.updateAllPrices()
+        // Market data is downloaded and refreshed by SkyBlockAPI itself.
+        ItemValuator.loadPriceModeFromConfig()
+        // Re-fetches auction prices if SkyBlockAPI's startup download failed.
+        AuctionDataFallback.init()
     }
 }

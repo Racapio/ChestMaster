@@ -8,6 +8,7 @@ by meowdding and contributors:
 - `src/client/kotlin/com/chestmaster/scanner/ChestScanner.kt` — chest tracking (right-click position,
   translation-key title check, save on close, per-half double chests, removal on block break)
 - `src/client/kotlin/com/chestmaster/highlight/SearchHighlight.kt` — in-inventory item highlighting
+- `src/client/kotlin/com/chestmaster/highlight/HighlightGeometry.kt` — through-walls chest marker
 - `src/client/kotlin/com/chestmaster/search/HoverSearch.kt` — search the hovered item via keybind
 
 SkyOcean's source code (`.kt`, `.java`, `.kts`) is licensed under the MIT License:

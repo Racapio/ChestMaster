@@ -8,18 +8,17 @@ Open your storage chests once — ChestMaster remembers everything in them, tell
 
 - 🗃️ **Auto-scan** — every chest you open on your Private Island is indexed into a local SQLite database (exact position from the click, saved on close, menus never get in)
 - 🔍 **Fast search** — find any item across all your scanned chests (`/cm` or a hotkey)
-- 💰 **Valuation** — Bazaar, Auction House lowest-BIN and NPC prices, including:
-  - powered by SkyBlockAPI's item value calculator (the one SkyOcean uses)
+- 💰 **Valuation** — Bazaar, Auction House lowest-BIN and NPC prices via SkyBlockAPI, including:
   - enchantments at any level, stars & master stars, gemstones, reforges, drill/rod parts, Necron scrolls, runes, dyes, skins
   - pets (by type + tier) and attribute shards
-- 📦 **Chest highlighting** — click an item and glowing markers show which chests contain it
+- 📦 **Chest highlighting** — click an item and a rainbow box, visible through walls, shows which chests contain it
 - ✨ **In-inventory highlight** — matching stacks light up in any open inventory; highlights clear themselves after a set time
 - ⌨️ **Search the hovered item** — hover an item in any inventory and press the ChestMaster key
 - 🛒 **Open on market** — one click runs `/bz <item>` or `/ahs <item>` for the selected item
 - 📊 **Sorting & filters** — by price/name/count, filter by price source (Bazaar/AH/Unknown)
 - 🌐 **Per-server tracking** — data from different servers never mixes
 - 📤 **CSV export** — `/cm export` dumps your storage to a spreadsheet
-- ⚙️ **Mod Menu config** — auto-scan, default sort, price mode, refresh interval, verbose logging
+- ⚙️ **Mod Menu config** — auto-scan, default sort, price mode, highlight time, verbose logging
 
 ## What it does NOT do
 
@@ -57,4 +56,3 @@ It only reads container contents that are already visible on your client and sto
 
 Нашли баг? Discord: **Racap**
 
-Large parts of the chest tracking are ported from [SkyOcean](https://modrinth.com/mod/skyocean) (MIT) — thanks!

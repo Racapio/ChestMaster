@@ -27,15 +27,31 @@ object ChestLocationHighlighter {
             val cameraPos = context.levelState().cameraRenderState.pos
             val poseStack = context.poseStack()
 
+            val e = HighlightGeometry.INFLATE
+            val fillColor = HighlightGeometry.rainbow(alpha = 110)
+            val outline = HighlightGeometry.rainbow(alpha = 255)
+
             poseStack.pushPose()
             poseStack.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z)
+            // 1) Translucent rainbow fill, visible through walls (SkyOcean-style).
+            context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.textBackgroundSeeThrough()) { pose, buffer ->
+                for (pos in positions) {
+                    HighlightGeometry.fillBox(
+                        pose, buffer,
+                        pos.x - e, pos.y - e, pos.z - e,
+                        pos.x + 1 + e, pos.y + 1 + e, pos.z + 1 + e,
+                        fillColor
+                    )
+                }
+            }
+            // 2) Crisp outline on top, same hue.
             context.submitNodeCollector().submitCustomGeometry(poseStack, RenderTypes.LINES) { pose, buffer ->
                 for (pos in positions) {
                     renderBox(
                         pose, buffer,
-                        pos.x.toFloat(), pos.y.toFloat(), pos.z.toFloat(),
-                        (pos.x + 1).toFloat(), (pos.y + 1).toFloat(), (pos.z + 1).toFloat(),
-                        0.0f, 1.0f, 0.35f, 0.9f
+                        pos.x - e, pos.y - e, pos.z - e,
+                        pos.x + 1 + e, pos.y + 1 + e, pos.z + 1 + e,
+                        ((outline shr 16) and 0xFF) / 255f, ((outline shr 8) and 0xFF) / 255f, (outline and 0xFF) / 255f, 1f
                     )
                 }
             }
@@ -73,7 +89,7 @@ object ChestLocationHighlighter {
             return 0
         }
 
-        val unique = positions.distinct()
+        val unique = HighlightGeometry.withDoubleChestHalves(positions.distinct())
         activePositions = unique
 
         if (ChestMasterMod.isVerboseLogging()) {

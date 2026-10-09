@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.PoseStack
 import com.mojang.blaze3d.vertex.VertexConsumer
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
 import net.minecraft.client.Minecraft
+import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.core.BlockPos
 
 object ChestLocationHighlighter {
@@ -23,17 +24,32 @@ object ChestLocationHighlighter {
 
             val cameraPos = context.gameRenderer().getMainCamera().position()
             val matrices = context.poseStack()
-            val buffer = VersionHelper.getLinesBuffer(context.bufferSource())
+            val e = HighlightGeometry.INFLATE
 
             matrices.pushPose()
             matrices.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z)
 
+            // 1) Translucent rainbow fill, visible through walls (SkyOcean-style).
+            val fill = context.bufferSource().getBuffer(RenderTypes.textBackgroundSeeThrough())
+            val fillColor = HighlightGeometry.rainbow(alpha = 110)
+            for (pos in positions) {
+                HighlightGeometry.fillBox(
+                    matrices.last(), fill,
+                    pos.x - e, pos.y - e, pos.z - e,
+                    pos.x + 1 + e, pos.y + 1 + e, pos.z + 1 + e,
+                    fillColor
+                )
+            }
+
+            // 2) Crisp outline on top, same hue.
+            val outline = HighlightGeometry.rainbow(alpha = 255)
+            val lines = VersionHelper.getLinesBuffer(context.bufferSource())
             for (pos in positions) {
                 renderBox(
-                    matrices, buffer,
-                    pos.x.toFloat(), pos.y.toFloat(), pos.z.toFloat(),
-                    (pos.x + 1).toFloat(), (pos.y + 1).toFloat(), (pos.z + 1).toFloat(),
-                    0.0f, 1.0f, 0.35f, 0.9f
+                    matrices, lines,
+                    pos.x - e, pos.y - e, pos.z - e,
+                    pos.x + 1 + e, pos.y + 1 + e, pos.z + 1 + e,
+                    ((outline shr 16) and 0xFF) / 255f, ((outline shr 8) and 0xFF) / 255f, (outline and 0xFF) / 255f, 1f
                 )
             }
 
@@ -71,7 +87,7 @@ object ChestLocationHighlighter {
             return 0
         }
 
-        val unique = positions.distinct()
+        val unique = HighlightGeometry.withDoubleChestHalves(positions.distinct())
         activePositions = unique
 
         if (ChestMasterMod.isVerboseLogging()) {

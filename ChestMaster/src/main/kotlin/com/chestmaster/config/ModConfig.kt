@@ -5,8 +5,6 @@ data class ModConfig(
     var verboseLogging: Boolean = false,
     var sortMode: String = "PRICE_DESC",
     var priceMode: String = "SELL_OFFER",
-    // Seconds between market price refreshes (Bazaar/LBIN/NPC cache duration).
-    var bazaarUpdateInterval: Int = 300,
     // Seconds before item/chest highlights clear themselves; 0 = never.
     var highlightSeconds: Int = 60
 )

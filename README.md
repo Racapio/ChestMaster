@@ -44,11 +44,12 @@ The mod is read-only QoL: no automation, no movement/combat macros, no packet sp
 
 ## Features
 
-- Auto-scan of chests on your Private Island — exact position from the click, saved on close, Hypixel menus never get in (tracking ported from [SkyOcean](https://github.com/meowdding/SkyOcean), MIT)
+- Auto-scan of chests on your Private Island — exact position from the click, saved on close, Hypixel menus never get in
 - Local SQLite database — data persists between sessions
 - Per-server item tracking — no cross-server data mixing
 - Fast search with item stacking and aggregation
 - Item valuation via SkyBlockAPI's calculator: enchantments at any level, stars, gemstones, reforges, drill/rod parts, pets, shards…
+- Chest markers: translucent rainbow box visible through walls
 - In-inventory highlight of the selected item + auto-clear timer
 - Search the hovered item with the ChestMaster key
 - "Last seen" timestamps for each scanned chest

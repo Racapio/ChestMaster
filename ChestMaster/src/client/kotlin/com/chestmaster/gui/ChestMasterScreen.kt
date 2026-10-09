@@ -8,7 +8,6 @@ import com.chestmaster.scanner.ChestScanner
 import com.chestmaster.util.ItemUtils
 import com.chestmaster.util.WorldUtils
 import com.chestmaster.valuation.ItemValuator
-import com.chestmaster.valuation.SkyBlockValuation
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.components.AbstractWidget
@@ -20,6 +19,7 @@ import net.minecraft.client.input.KeyEvent
 import net.minecraft.client.input.MouseButtonEvent
 import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
+import net.minecraft.world.item.ItemStack
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
@@ -109,11 +109,17 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
     private var scrollOffset = 0
     private val itemHeight = 26
     private var totalValue = 0.0
-    private val priceCache = LinkedHashMap<String, Double>()
+    // One SkyBlockAPI valuation per record (price, source, breakdown). Unpriced entries are
+    // retried periodically, because SkyBlockAPI may still be downloading its market data.
+    private val valuationCache = HashMap<String, ItemValuator.Valuation>()
+    private var lastValuationRetryMs = 0L
     private val displayLabelCache = LinkedHashMap<String, String>()
     private val itemNameColorCache = LinkedHashMap<String, Int>()
-    private var pricesWereLoaded = false
-    private var lastSeenDataEpoch = -1L
+    private var lastMarketSignature = Long.MIN_VALUE
+    private var selectedRecord: ItemRecord? = null
+    private var selectedStack: ItemStack = ItemStack.EMPTY
+    private var detailScroll = 0
+    private var detailContentHeight = 0
     private var openMarketButton: StyledButton? = null
     private var modeButton: StyledButton? = null
     private var filterButton: StyledButton? = null
@@ -121,18 +127,11 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
     private var autoScanButton: StyledButton? = null
     private var sortMode = SortMode.PRICE_DESC
     private var sourceFilter = ItemSourceFilter.ALL
-    private val sourceCache = LinkedHashMap<String, ItemValuator.PriceSource>()
     private var sourceStats = SourceStats()
 
     private var selectedItemKey: String? = null
     private var selectedItemName: String? = null
-    private var selectedBreakdown: ItemValuator.PriceBreakdown? = null
-    private var selectedSbValue: SkyBlockValuation.Result? = null
-
-    // SkyBlockAPI valuation per record. Nulls (not priceable yet — e.g. SkyBlockAPI still
-    // loading its price data) are retried periodically instead of on every frame.
-    private val sbValueCache = HashMap<String, SkyBlockValuation.Result?>()
-    private var lastSbRetryMs = 0L
+    private var selectedValuation: ItemValuator.Valuation? = null
     private var selectedSource = ItemValuator.PriceSource.UNKNOWN
     private var selectedUnitPrice = 0.0
     private var selectedStackPrice = 0.0
@@ -221,13 +220,9 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         addRenderableWidget(searchField!!)
 
         val refreshButton = createStyledButton(centerX + 136, 34, 74, 20, "Refresh") {
-            priceCache.clear()
-            sbValueCache.clear()
+            valuationCache.clear()
             displayLabelCache.clear()
             itemNameColorCache.clear()
-            sourceCache.clear()
-            pricesWereLoaded = false
-            ItemValuator.updateAllPrices()
             refreshItems(searchField?.value ?: "")
         }
         addRenderableWidget(refreshButton)
@@ -236,8 +231,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
             // togglePriceMode also persists the choice to the config.
             ItemValuator.togglePriceMode()
             updateModeButtonLabel()
-            priceCache.clear()
-            sbValueCache.clear()
+            valuationCache.clear()
             displayLabelCache.clear()
             itemNameColorCache.clear()
             applySortAndRecalculate()
@@ -273,10 +267,6 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         }
         addRenderableWidget(autoScanButton!!)
 
-        // Always kick a refresh: cached sources return instantly and previously
-        // failed pet price fetches get retried (overlapping calls are ignored).
-        ItemValuator.updateAllPrices()
-
         val layout = computeLayout()
         openMarketButton = createStyledButton(
             layout.detailLeft + 8,
@@ -290,8 +280,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         addRenderableWidget(openMarketButton!!)
 
         refreshItems(previousQuery)
-        pricesWereLoaded = ItemValuator.arePricesLoaded()
-        lastSeenDataEpoch = ItemValuator.getDataEpoch()
+        lastMarketSignature = ItemValuator.marketDataSignature()
     }
 
     override fun removed() {
@@ -371,8 +360,9 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         if (selected == null) {
             selectedItemKey = null
             selectedItemName = null
-            selectedBreakdown = null
-            selectedSbValue = null
+            selectedValuation = null
+            selectedRecord = null
+            selectedStack = ItemStack.EMPTY
             selectedSource = ItemValuator.PriceSource.UNKNOWN
             selectedUnitPrice = 0.0
             selectedStackPrice = 0.0
@@ -389,8 +379,8 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         selectedSource = getItemSource(selected)
         selectedUnitPrice = getCachedPrice(selected)
         selectedStackPrice = selectedUnitPrice * selected.count.toDouble()
-        selectedBreakdown = ItemValuator.getPriceBreakdownFromNbt(selected.itemId, selected.itemNbt)
-        selectedSbValue = sbValue(selected)
+        selectedValuation = valuation(selected)
+        selectSnapshot(selected)
         val serverKey = WorldUtils.getCurrentServerKey()
         selectedChestLocations = ChestMasterMod.db.findChestLocationsForItem(
             selected.itemId,
@@ -404,61 +394,26 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         updateOpenMarketButton()
     }
 
-    private fun sbValue(record: ItemRecord): SkyBlockValuation.Result? {
-        val key = recordKey(record)
-        if (sbValueCache.containsKey(key)) return sbValueCache[key]
-        val value = runCatching { SkyBlockValuation.evaluate(record) }.getOrNull()
-        sbValueCache[key] = value
-        return value
-    }
+    private fun valuation(record: ItemRecord): ItemValuator.Valuation =
+        valuationCache.getOrPut(recordKey(record)) {
+            runCatching { ItemValuator.evaluate(record) }
+                .getOrElse { ItemValuator.Valuation(record.itemId, ItemValuator.PriceSource.UNKNOWN, 0.0, emptyList()) }
+        }
 
     /** Re-tries unpriced items every 15 s and re-sorts once something new got a price. */
-    private fun retryUnpricedSbValues() {
+    private fun retryUnpricedValuations() {
         val now = System.currentTimeMillis()
-        if (now - lastSbRetryMs < 15_000L) return
-        lastSbRetryMs = now
-        val unpriced = sbValueCache.filterValues { it == null }.keys
+        if (now - lastValuationRetryMs < 15_000L) return
+        lastValuationRetryMs = now
+        val unpriced = valuationCache.filterValues { !it.priced }.keys.toHashSet()
         if (unpriced.isEmpty()) return
-        unpriced.toList().forEach { sbValueCache.remove(it) }
-        if (sourceItems.any { recordKey(it) in unpriced && sbValue(it) != null }) {
-            priceCache.clear()
+        unpriced.forEach { valuationCache.remove(it) }
+        if (sourceItems.any { recordKey(it) in unpriced && valuation(it).priced }) {
             applySortAndRecalculate()
         }
     }
 
-    private fun getCachedPrice(record: ItemRecord): Double {
-        val cacheKey = "${record.itemId}@@${record.baseItemId}@@${record.itemNbt}"
-        return priceCache.getOrPut(cacheKey) {
-            try {
-                sbValue(record)?.let { return@getOrPut it.unitPrice }
-
-                val fromBreakdown = ItemValuator.getPriceFromNbt(record.itemId, record.itemNbt)
-                if (fromBreakdown >= 0.0) {
-                    return@getOrPut fromBreakdown
-                }
-
-                val baseId = record.baseItemId.ifBlank { record.itemId }
-                val stack = ItemUtils.deserializeItemStack(baseId, record.itemNbt)
-                val fromStack = ItemValuator.getPrice(stack)
-                if (fromStack >= 0.0) {
-                    return@getOrPut fromStack
-                }
-
-                val extractedSkyblockId = ItemUtils.extractSkyblockIdFromNbtString(record.itemNbt)
-                if (!extractedSkyblockId.isNullOrBlank()) {
-                    val fromExtracted = ItemValuator.getPriceBySkyblockId(extractedSkyblockId)
-                    if (fromExtracted >= 0.0) {
-                        return@getOrPut fromExtracted
-                    }
-                }
-
-                val byItemId = ItemValuator.getPriceBySkyblockId(record.itemId)
-                if (byItemId >= 0.0) byItemId else 0.0
-            } catch (_: Exception) {
-                0.0
-            }
-        }
-    }
+    private fun getCachedPrice(record: ItemRecord): Double = valuation(record).unitPrice
 
     private fun getDisplayLabel(record: ItemRecord): String {
         return displayLabelCache.getOrPut(recordKey(record)) {
@@ -477,10 +432,8 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
                 return@getOrPut baseName
             }
 
-            val breakdown = ItemValuator.getPriceBreakdownFromNbt(record.itemId, record.itemNbt)
-            val bestComponent = breakdown.upgradeComponents.maxByOrNull { it.value }
-            val upgradeName = bestComponent?.label?.takeIf { it.isNotBlank() } ?: return@getOrPut baseName
-            "Enchanted Book ($upgradeName)"
+            val enchant = ItemValuator.bookEnchantLabel(record.itemNbt) ?: return@getOrPut baseName
+            "Enchanted Book ($enchant)"
         }
     }
 
@@ -631,64 +584,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         }
     }
 
-    private fun getItemSource(record: ItemRecord): ItemValuator.PriceSource {
-        return sourceCache.getOrPut(recordKey(record)) {
-            val candidates = linkedSetOf<String>()
-            // Prefer explicit SkyBlock ids from NBT/itemId.
-            ItemUtils.extractSkyblockIdFromNbtString(record.itemNbt)
-                ?.takeIf { !it.contains(':') }
-                ?.let { candidates += it }
-            ItemUtils.normalizeSkyblockId(record.itemId)
-                ?.takeIf { !it.contains(':') }
-                ?.let { candidates += it }
-
-            for (candidate in candidates) {
-                val source = ItemValuator.getPriceSourceForId(candidate)
-                if (source != ItemValuator.PriceSource.UNKNOWN) {
-                    return@getOrPut source
-                }
-            }
-
-            val breakdown = ItemValuator.getPriceBreakdownFromNbt(record.itemId, record.itemNbt)
-            val breakdownSource = ItemValuator.getPriceSourceForId(breakdown.itemId)
-            if (breakdownSource != ItemValuator.PriceSource.UNKNOWN) {
-                return@getOrPut breakdownSource
-            }
-
-            // Enchanted books are priced via enchant components (Bazaar-based).
-            if (isGenericBookRecord(record) || breakdown.itemId == "ENCHANTED_BOOK") {
-                return@getOrPut ItemValuator.PriceSource.BAZAAR
-            }
-
-            // Pets are Auction items.
-            if (isPetRecord(record, breakdown.itemId)) {
-                return@getOrPut ItemValuator.PriceSource.AUCTION
-            }
-
-            ItemValuator.PriceSource.UNKNOWN
-        }
-    }
-
-    private fun isGenericBookRecord(record: ItemRecord): Boolean {
-        val normalizedItemId = ItemUtils.normalizeSkyblockId(record.itemId)
-        val normalizedBaseItemId = record.baseItemId.lowercase()
-        val name = record.displayName
-        return normalizedItemId == "ENCHANTED_BOOK" ||
-            normalizedItemId == "BOOK" ||
-            normalizedBaseItemId == "minecraft:enchanted_book" ||
-            normalizedBaseItemId == "minecraft:book" ||
-            name.equals("Enchanted Book", ignoreCase = true) ||
-            name.equals("Book", ignoreCase = true)
-    }
-
-    private fun isPetRecord(record: ItemRecord, breakdownItemId: String): Boolean {
-        if (ItemUtils.normalizeSkyblockId(record.itemId) == "PET") return true
-        if (breakdownItemId == "PET") return true
-
-        val extra = ItemUtils.extractExtraAttributesFromNbtString(record.itemNbt) ?: return false
-        val petInfo = extra.getString("petInfo").orElse(null)
-        return !petInfo.isNullOrBlank()
-    }
+    private fun getItemSource(record: ItemRecord): ItemValuator.PriceSource = valuation(record).source
 
     private fun matchesSourceFilter(record: ItemRecord): Boolean {
         val source = getItemSource(record)
@@ -731,8 +627,9 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         selectedSource = getItemSource(record)
         selectedUnitPrice = getCachedPrice(record)
         selectedStackPrice = selectedUnitPrice * record.count.toDouble()
-        selectedBreakdown = ItemValuator.getPriceBreakdownFromNbt(record.itemId, record.itemNbt)
-        selectedSbValue = sbValue(record)
+        selectedValuation = valuation(record)
+        selectSnapshot(record)
+        detailScroll = 0
         SearchHighlight.set(record)
 
         val serverKey = WorldUtils.getCurrentServerKey()
@@ -805,18 +702,14 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
     }
 
     override fun extractRenderState(guiGraphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, partialTick: Float) {
-        retryUnpricedSbValues()
-        val loadedNow = ItemValuator.arePricesLoaded()
-        val epochNow = ItemValuator.getDataEpoch()
-        if (loadedNow != pricesWereLoaded || epochNow != lastSeenDataEpoch) {
-            pricesWereLoaded = loadedNow
-            lastSeenDataEpoch = epochNow
-            if (loadedNow) {
-                priceCache.clear()
-                sbValueCache.clear()
-                sourceCache.clear()
-                refreshItems(searchField?.value ?: "")
-            }
+        retryUnpricedValuations()
+        // SkyBlockAPI swapped in new market data (first load, auction data arriving after the
+        // Bazaar, or a periodic refresh): re-evaluate everything so nothing stays half-priced.
+        val signature = ItemValuator.marketDataSignature()
+        if (signature != lastMarketSignature) {
+            lastMarketSignature = signature
+            valuationCache.clear()
+            refreshItems(searchField?.value ?: "")
         }
 
         guiGraphics.fillGradient(0, 0, width, height, 0xB40A0F17.toInt(), 0xE0141D2B.toInt())
@@ -837,15 +730,11 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         val totalText = if (ItemValuator.arePricesLoaded()) {
             "${ItemValuator.formatPrice(totalValue)} coins"
         } else {
-            "Loading..."
+            "Loading market data..."
         }
         guiGraphics.text(font, "Total Value: $totalText", layout.listLeft, 88, 0xFFEAF2FF.toInt(), false)
         val topStats = "Shown ${items.size}/${sourceStats.total} | Baz ${sourceStats.bazaar} | AH ${sourceStats.auction} | Filter ${sourceFilter.label}"
         guiGraphics.text(font, ellipsize(topStats, max(80, layout.detailRight - layout.detailLeft - 8)), layout.detailLeft, 88, 0xFF9FB5D3.toInt(), false)
-
-        if (ItemValuator.isLbinUnavailable()) {
-            guiGraphics.text(font, "AH prices unavailable", layout.detailRight - 110, 88, 0xFFFF8888.toInt(), false)
-        }
 
         drawPanel(
             guiGraphics,
@@ -903,7 +792,8 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
                 guiGraphics.itemDecorations(font, stack, rowLeft + 4, rowTop + 4)
 
                 val nameX = rowLeft + 26
-                val totalLabel = if (ItemValuator.arePricesLoaded()) {
+                val hasPrice = ItemValuator.arePricesLoaded() || valuation(record).priced
+                val totalLabel = if (hasPrice) {
                     ItemValuator.formatPrice(getCachedPrice(record) * record.count.toDouble())
                 } else {
                     "Loading..."
@@ -917,7 +807,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
                 guiGraphics.text(font, itemLabel, nameX, rowTop + 5, itemNameColor, false)
                 guiGraphics.text(font, totalLabel, totalX, rowTop + 5, 0xFFE5EEFF.toInt(), false)
 
-                if (ItemValuator.arePricesLoaded()) {
+                if (hasPrice) {
                     val unitText = "unit ${ItemValuator.formatPrice(getCachedPrice(record))}"
                     guiGraphics.text(font, unitText, nameX, rowTop + 15, 0xFF99AECB.toInt(), false)
                 }
@@ -948,9 +838,66 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         renderDetailPanel(guiGraphics, layout)
     }
 
+    private fun selectSnapshot(record: ItemRecord) {
+        selectedRecord = record
+        selectedStack = runCatching {
+            ItemUtils.deserializeItemStack(record.baseItemId.ifBlank { record.itemId }, record.itemNbt)
+        }.getOrDefault(ItemStack.EMPTY)
+    }
+
+    private val groupPalette = intArrayOf(
+        0xFFFFC857.toInt(), // gold
+        0xFFB98CFF.toInt(), // purple
+        0xFF5FD3F3.toInt(), // cyan
+        0xFF7BE07B.toInt(), // green
+        0xFFFF7EB6.toInt(), // pink
+        0xFFFF9F43.toInt()  // orange
+    )
+
+    private fun sourceColor(source: ItemValuator.PriceSource): Int = when (source) {
+        ItemValuator.PriceSource.BAZAAR -> 0xFFE0B040.toInt()
+        ItemValuator.PriceSource.AUCTION -> 0xFF9B6BFF.toInt()
+        ItemValuator.PriceSource.NPC -> 0xFF4CC38A.toInt()
+        ItemValuator.PriceSource.UNKNOWN -> 0xFF6B7A8C.toInt()
+    }
+
+    /** Small rounded-looking label chip; returns its width. */
+    private fun drawPill(g: GuiGraphicsExtractor, x: Int, y: Int, text: String, color: Int): Int {
+        val w = font.width(text) + 8
+        val bg = (color and 0x00FFFFFF) or 0x55000000
+        g.fill(x + 1, y, x + w - 1, y + 11, bg)
+        g.fill(x, y + 1, x + w, y + 10, bg)
+        g.fill(x + 1, y + 10, x + w - 1, y + 11, color)
+        g.text(font, text, x + 4, y + 2, 0xFFF4F8FF.toInt(), false)
+        return w
+    }
+
+    private fun drawScaledText(g: GuiGraphicsExtractor, text: String, x: Int, y: Int, scale: Float, color: Int) {
+        val pose = g.pose()
+        pose.pushMatrix()
+        pose.translate(x.toFloat(), y.toFloat())
+        pose.scale(scale, scale)
+        g.text(font, text, 0, 0, color, true)
+        pose.popMatrix()
+    }
+
+    private fun drawScaledItem(g: GuiGraphicsExtractor, stack: ItemStack, x: Int, y: Int, scale: Float) {
+        val pose = g.pose()
+        pose.pushMatrix()
+        pose.translate(x.toFloat(), y.toFloat())
+        pose.scale(scale, scale)
+        g.item(stack, 0, 0)
+        pose.popMatrix()
+    }
+
+    private fun drawRightAligned(g: GuiGraphicsExtractor, text: String, right: Int, y: Int, color: Int) {
+        g.text(font, text, right - font.width(text), y, color, false)
+    }
+
     private fun renderDetailPanel(guiGraphics: GuiGraphicsExtractor, layout: Layout) {
+        val g = guiGraphics
         drawPanel(
-            guiGraphics,
+            g,
             layout.detailLeft,
             layout.detailTop,
             layout.detailRight,
@@ -960,100 +907,159 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
             0xAA6B8FB5.toInt()
         )
 
-        val textLeft = layout.detailLeft + 8
-        val textWidth = max(70, layout.detailRight - layout.detailLeft - 16)
-        var y = layout.detailTop + 8
-        val lineHeight = 10
+        val left = layout.detailLeft + 8
+        val right = layout.detailRight - 8
+        val innerWidth = max(70, right - left)
+        val buttonSpace = if (openMarketButton?.visible == true) 32 else 6
+        val clipTop = layout.detailTop + 2
+        val clipBottom = layout.detailBottom - buttonSpace
 
-        guiGraphics.text(font, "Market Summary", textLeft, y, 0xFFEAF3FF.toInt(), false)
-        y += 12
-
-        val summaryLines = listOf(
-            "Filter: ${sourceFilter.label}",
-            "Showing: ${items.size}/${sourceStats.total}",
-            "Bazaar: ${sourceStats.bazaar} | Auction: ${sourceStats.auction}",
-            "NPC (incl. fallback): ${sourceStats.npc} | Unknown: ${sourceStats.unknown}",
-            "Markers active: ${ChestLocationHighlighter.getActiveMarkerCount()}"
-        )
-        for (line in summaryLines) {
-            guiGraphics.text(font, ellipsize(line, textWidth), textLeft, y, 0xFFADC4DF.toInt(), false)
-            y += lineHeight
-        }
-
-        y += 2
-        guiGraphics.fill(textLeft, y, layout.detailRight - 8, y + 1, 0x77648CB6)
+        // --- market summary chips (always visible, not scrolled)
+        var y = layout.detailTop + 7
+        var x = left
+        x += drawPill(g, x, y, "${items.size}/${sourceStats.total} items", 0xFF6B8FB5.toInt()) + 4
+        x += drawPill(g, x, y, "Bazaar ${sourceStats.bazaar}", sourceColor(ItemValuator.PriceSource.BAZAAR)) + 4
+        x += drawPill(g, x, y, "AH ${sourceStats.auction}", sourceColor(ItemValuator.PriceSource.AUCTION)) + 4
+        x += drawPill(g, x, y, "NPC ${sourceStats.npc}", sourceColor(ItemValuator.PriceSource.NPC)) + 4
+        if (x + 50 < right) drawPill(g, x, y, "? ${sourceStats.unknown}", sourceColor(ItemValuator.PriceSource.UNKNOWN))
+        y += 16
+        g.fill(left, y, right, y + 1, 0x55648CB6)
         y += 6
 
-        guiGraphics.text(font, "Selected Item", textLeft, y, 0xFFEAF3FF.toInt(), false)
-        y += 12
-
-        val breakdown = selectedBreakdown
-        if (breakdown == null || selectedItemName.isNullOrBlank()) {
-            guiGraphics.text(font, "Click an item to inspect it.", textLeft, y, 0xFFC2D2E6.toInt(), false)
-            y += lineHeight
-            guiGraphics.text(font, "Click also highlights chest locations.", textLeft, y, 0xFF93A7C2.toInt(), false)
-            y += lineHeight
-            guiGraphics.text(font, "Use Show button for Bazaar/Auction.", textLeft, y, 0xFF85D8FF.toInt(), false)
-            y += lineHeight
-            guiGraphics.text(font, "Clear markers: /cm m clear", textLeft, y, 0xFF8A9FB9.toInt(), false)
+        val valuation = selectedValuation
+        val record = selectedRecord
+        if (valuation == null || record == null || selectedItemName.isNullOrBlank()) {
+            detailContentHeight = 0
+            val hints = listOf(
+                "Click an item to see its value" to 0xFFC2D2E6.toInt(),
+                "and where it is stored." to 0xFFC2D2E6.toInt(),
+                "" to 0,
+                "Chests containing it light up" to 0xFF93A7C2.toInt(),
+                "in the world, visible through walls." to 0xFF93A7C2.toInt(),
+                "" to 0,
+                "Clear markers: /cm m clear" to 0xFF7F95B3.toInt()
+            )
+            for ((text, color) in hints) {
+                if (text.isNotEmpty()) g.text(font, ellipsize(text, innerWidth), left, y, color, false)
+                y += 10
+            }
             return
         }
 
-        val lines = ArrayList<Pair<String, Int>>()
-        lines += ellipsize(selectedItemName ?: "", textWidth) to selectedItemNameColor
-        lines += "Source: ${selectedSource.label}" to 0xFF9FD5FF.toInt()
-        lines += "Unit: ${ItemValuator.formatPrice(selectedUnitPrice)}" to 0xFFD5E6FF.toInt()
-        lines += "Stack: ${ItemValuator.formatPrice(selectedStackPrice)}" to 0xFFD5E6FF.toInt()
-        lines += "ID: ${breakdown.itemId}" to 0xFFABC1DD.toInt()
-        val sb = selectedSbValue
-        if (sb != null) {
-            lines += "Value breakdown:" to 0xFF8ED4FF.toInt()
-            for (line in sb.lines.take(10)) {
-                lines += " + ${line.label}: ${ItemValuator.formatPrice(line.value)}" to 0xFFBFD9F4.toInt()
-            }
-            lines += "Estimated Total: ${ItemValuator.formatPrice(sb.unitPrice)}" to 0xFFFFE08D.toInt()
+        // --- scrollable body
+        val bodyTop = y
+        val visibleHeight = clipBottom - bodyTop
+        val maxScroll = max(0, detailContentHeight - visibleHeight)
+        detailScroll = detailScroll.coerceIn(0, maxScroll)
+        g.enableScissor(layout.detailLeft + 1, bodyTop - 2, layout.detailRight - 1, clipBottom)
+        y = bodyTop - detailScroll
+
+        // Item card: big icon, name, source chip, prices
+        val cardTop = y
+        val cardHeight = 58
+        g.fill(left, cardTop, right, cardTop + cardHeight, 0x40000000)
+        g.fill(left, cardTop, left + 2, cardTop + cardHeight, selectedItemNameColor)
+        g.fill(left + 6, cardTop + 6, left + 42, cardTop + 42, 0x50FFFFFF)
+        g.fill(left + 7, cardTop + 7, left + 41, cardTop + 41, 0x90101820.toInt())
+        if (!selectedStack.isEmpty) drawScaledItem(g, selectedStack, left + 8, cardTop + 8, 2f)
+
+        val textX = left + 48
+        val textWidth = max(40, right - textX - 4)
+        g.text(font, ellipsize(selectedItemName ?: "", textWidth), textX, cardTop + 6, selectedItemNameColor, true)
+        var chipX = textX
+        chipX += drawPill(g, chipX, cardTop + 18, selectedSource.label, sourceColor(selectedSource)) + 4
+        if (record.count > 1) drawPill(g, chipX, cardTop + 18, "x${record.count}", 0xFF6B8FB5.toInt())
+
+        val unitText = if (valuation.priced) ItemValuator.formatPrice(selectedUnitPrice) else "—"
+        drawScaledText(g, unitText, textX, cardTop + 34, 2f, 0xFFFFD866.toInt())
+        val unitWidth = font.width(unitText) * 2
+        g.text(font, "each", textX + unitWidth + 4, cardTop + 41, 0xFF8FA3BF.toInt(), false)
+        if (record.count > 1 && valuation.priced) {
+            val stackText = "stack ${ItemValuator.formatPrice(selectedStackPrice)}"
+            drawRightAligned(g, stackText, right - 4, cardTop + 41, 0xFFE8D9A0.toInt())
+        }
+        y = cardTop + cardHeight + 8
+
+        // Value breakdown
+        g.text(font, "VALUE BREAKDOWN", left, y, 0xFF8ED4FF.toInt(), false)
+        if (valuation.priced) drawRightAligned(g, ItemValuator.formatPrice(valuation.unitPrice), right, y, 0xFFFFE08D.toInt())
+        y += 12
+        if (!valuation.priced) {
+            g.text(font, ellipsize("No market price found for this item.", innerWidth), left, y, 0xFFFF9C9C.toInt(), false)
+            y += 10
+            g.text(font, ellipsize("ID: ${valuation.skyblockId.ifBlank { "?" }}", innerWidth), left, y, 0xFF7F95B3.toInt(), false)
+            y += 14
         } else {
-        lines += "Base: ${ItemValuator.formatPrice(breakdown.basePrice)}" to 0xFFE2EBF8.toInt()
-
-        if (breakdown.stars > 0 && breakdown.starBonus > 0.0) {
-            lines += "Stars ${breakdown.stars}: +${ItemValuator.formatPrice(breakdown.starBonus)}" to 0xFFFFDA94.toInt()
-        }
-        if (breakdown.recombed && breakdown.recombBonus > 0.0) {
-            lines += "Recomb: +${ItemValuator.formatPrice(breakdown.recombBonus)}" to 0xFFC28FFF.toInt()
-        }
-
-        if (breakdown.upgradeComponents.isNotEmpty()) {
-            lines += "Upgrades:" to 0xFF8ED4FF.toInt()
-            for (component in breakdown.upgradeComponents.sortedByDescending { it.value }.take(8)) {
-                lines += " + ${component.label}: ${ItemValuator.formatPrice(component.value)}" to 0xFFBFD9F4.toInt()
+            val total = valuation.unitPrice.coerceAtLeast(1.0)
+            for ((index, group) in valuation.groups.withIndex()) {
+                val color = groupPalette[index % groupPalette.size]
+                val valueText = ItemValuator.formatPrice(group.value)
+                g.fill(left, y + 1, left + 3, y + 8, color)
+                g.text(font, ellipsize(group.label, innerWidth - font.width(valueText) - 14), left + 6, y, 0xFFEAF2FF.toInt(), false)
+                drawRightAligned(g, valueText, right, y, color)
+                y += 10
+                // share bar
+                val share = (group.value / total).coerceIn(0.0, 1.0)
+                g.fill(left + 6, y, right, y + 2, 0x30FFFFFF)
+                g.fill(left + 6, y, left + 6 + ((right - left - 6) * share).toInt(), y + 2, color)
+                y += 5
+                val shownParts = if (group.parts.size == 1 && group.parts[0].label.equals(group.label, ignoreCase = true)) {
+                    emptyList()
+                } else {
+                    group.parts.take(4)
+                }
+                for (part in shownParts) {
+                    val partValue = ItemValuator.formatPrice(part.value)
+                    g.text(font, "•", left + 8, y, 0xFF5E7290.toInt(), false)
+                    g.text(font, ellipsize(part.label, innerWidth - font.width(partValue) - 22), left + 15, y, 0xFFB8C8DD.toInt(), false)
+                    drawRightAligned(g, partValue, right, y, 0xFF9FB2CC.toInt())
+                    y += 10
+                }
+                if (group.parts.size > shownParts.size && shownParts.isNotEmpty()) {
+                    g.text(font, "+${group.parts.size - shownParts.size} more", left + 15, y, 0xFF6F84A3.toInt(), false)
+                    y += 10
+                }
+                y += 3
             }
         }
 
-        if (breakdown.upgradeBonus > 0.0) {
-            lines += "Upgrade Total: ${ItemValuator.formatPrice(breakdown.upgradeBonus)}" to 0xFF8ED4FF.toInt()
+        // Locations
+        y += 2
+        g.fill(left, y, right, y + 1, 0x40648CB6)
+        y += 6
+        g.text(font, "STORED IN", left, y, 0xFF8ED4FF.toInt(), false)
+        drawRightAligned(g, "$selectedChestCount chest(s)", right, y, 0xFFA5BDD7.toInt())
+        y += 12
+        for (loc in selectedChestLocations.take(6)) {
+            g.fill(left + 2, y + 1, left + 8, y + 7, 0xFFB98A4E.toInt())
+            g.fill(left + 2, y + 3, left + 8, y + 4, 0xFF5A3E1F.toInt())
+            val coords = "${loc.x}, ${loc.y}, ${loc.z}"
+            g.text(font, coords, left + 12, y, 0xFFD5E2F2.toInt(), false)
+            if (loc.label.isNotBlank()) {
+                val labelX = left + 16 + font.width(coords)
+                g.text(font, ellipsize(loc.label, max(10, right - labelX)), labelX, y, 0xFF6F84A3.toInt(), false)
+            }
+            y += 10
         }
-
-        lines += "Estimated Total: ${ItemValuator.formatPrice(breakdown.totalPrice)}" to 0xFFFFE08D.toInt()
+        if (selectedChestLocations.size > 6) {
+            g.text(font, "+${selectedChestLocations.size - 6} more", left + 12, y, 0xFF6F84A3.toInt(), false)
+            y += 10
         }
-        lines += "Found in: $selectedChestCount chest(s)" to 0xFFA5BDD7.toInt()
+        y += 4
+        g.text(font, ellipsize("Markers: $highlightedChestCount  ·  clear: /cm m clear", innerWidth), left, y, 0xFF6F84A3.toInt(), false)
+        y += 12
 
-        // Show up to 3 chest coordinates for quick reference.
-        for ((idx, loc) in selectedChestLocations.take(3).withIndex()) {
-            val label = if (loc.label.isNotBlank()) " (${loc.label})" else ""
-            lines += "  #${idx + 1}: ${loc.x}, ${loc.y}, ${loc.z}$label" to 0xFF88AACC.toInt()
-        }
-        if (selectedChestLocations.size > 3) {
-            lines += "  ... and ${selectedChestLocations.size - 3} more" to 0xFF6688AA.toInt()
-        }
+        detailContentHeight = y + detailScroll - bodyTop
+        g.disableScissor()
 
-        lines += "Highlighted: $highlightedChestCount marker(s)" to 0xFFA5BDD7.toInt()
-        lines += "Clear markers: /cm m clear" to 0xFF7FCDF3.toInt()
-
-        val reservedBottom = if (openMarketButton?.visible == true) 34 else 8
-        val maxLines = max(1, (layout.detailHeight - (y - layout.detailTop) - reservedBottom) / lineHeight)
-        for ((lineText, color) in lines.take(maxLines)) {
-            guiGraphics.text(font, ellipsize(lineText, textWidth), textLeft, y, color, false)
-            y += lineHeight
+        // Scroll hint when the body overflows
+        if (maxScroll > 0) {
+            val trackTop = bodyTop
+            val trackHeight = visibleHeight
+            val thumbHeight = max(12, trackHeight * visibleHeight / max(1, detailContentHeight))
+            val thumbTop = trackTop + ((trackHeight - thumbHeight) * detailScroll / max(1, maxScroll))
+            g.fill(layout.detailRight - 4, trackTop, layout.detailRight - 2, trackTop + trackHeight, 0x40445A74)
+            g.fill(layout.detailRight - 4, thumbTop, layout.detailRight - 2, thumbTop + thumbHeight, 0xFF8FB7DF.toInt())
         }
     }
 
@@ -1265,6 +1271,15 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
                     return true
                 }
             }
+        }
+
+        val insideDetail = mouseX >= layout.detailLeft &&
+            mouseX <= layout.detailRight &&
+            mouseY >= layout.detailTop &&
+            mouseY <= layout.detailBottom
+        if (insideDetail && selectedValuation != null) {
+            detailScroll = (detailScroll - (verticalAmount * 14).toInt()).coerceAtLeast(0)
+            return true
         }
 
         return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount)
