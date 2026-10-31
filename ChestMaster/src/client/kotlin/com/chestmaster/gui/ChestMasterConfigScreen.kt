@@ -35,6 +35,7 @@ class ChestMasterConfigScreen(private val parent: Screen?) : Screen(Component.li
     private var sortButton: StyledButton? = null
     private var priceModeButton: StyledButton? = null
     private var highlightButton: StyledButton? = null
+    private var cosmeticsButton: StyledButton? = null
 
     private inner class StyledButton(
         x: Int,
@@ -133,6 +134,14 @@ class ChestMasterConfigScreen(private val parent: Screen?) : Screen(Component.li
             ChestMasterMod.configManager.save()
             highlightButton?.setMessage(Component.literal(highlightLabel()))
         }
+        y += step
+
+        cosmeticsButton = addButton(x, y, buttonWidth, buttonHeight, cosmeticsLabel()) {
+            val config = ChestMasterMod.configManager.config
+            config.valueSkinsAndDyes = !config.valueSkinsAndDyes
+            ChestMasterMod.configManager.save()
+            cosmeticsButton?.setMessage(Component.literal(cosmeticsLabel()))
+        }
         y += step + 8
 
         addButton(x, y, buttonWidth, buttonHeight, "Done") { onClose() }
@@ -162,6 +171,9 @@ class ChestMasterConfigScreen(private val parent: Screen?) : Screen(Component.li
 
     private fun priceModeLabel(): String =
         "Price mode: ${ItemValuator.currentMode.label}"
+
+    private fun cosmeticsLabel(): String =
+        "Value skins & dyes: ${if (ChestMasterMod.configManager.config.valueSkinsAndDyes) "ON" else "OFF"}"
 
     private fun highlightLabel(): String {
         val seconds = ChestMasterMod.configManager.config.highlightSeconds

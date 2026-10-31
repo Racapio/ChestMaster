@@ -6,5 +6,7 @@ data class ModConfig(
     var sortMode: String = "PRICE_DESC",
     var priceMode: String = "SELL_OFFER",
     // Seconds before item/chest highlights clear themselves; 0 = never.
-    var highlightSeconds: Int = 60
+    var highlightSeconds: Int = 60,
+    // Whether applied dyes and skins (armor, helmet, pet) add to an item's value.
+    var valueSkinsAndDyes: Boolean = true
 )

@@ -10,12 +10,14 @@ import com.chestmaster.scanner.ChestScanner
 import com.chestmaster.search.HoverSearch
 import com.chestmaster.valuation.AuctionDataFallback
 import com.chestmaster.valuation.ItemValuator
+import com.chestmaster.valuation.PetPrices
+import com.chestmaster.valuation.ShardIds
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper
 import net.minecraft.client.KeyMapping
-import org.lwjgl.glfw.GLFW
+import com.mojang.blaze3d.platform.InputConstants
 
 class chestmasterClient : ClientModInitializer {
     override fun onInitializeClient() {
@@ -29,7 +31,7 @@ class chestmasterClient : ClientModInitializer {
         val openGuiKey = KeyMappingHelper.registerKeyMapping(
             KeyMapping(
                 "key.chestmaster.open",
-                GLFW.GLFW_KEY_UNKNOWN,
+                InputConstants.UNKNOWN.value,
                 guiCategory
             )
         )
@@ -70,5 +72,8 @@ class chestmasterClient : ClientModInitializer {
         ItemValuator.loadPriceModeFromConfig()
         // Re-fetches auction prices if SkyBlockAPI's startup download failed.
         AuctionDataFallback.init()
+        // Shard → Bazaar id table (bundled, refreshed from the NEU repo) and level-aware pet prices.
+        ShardIds.init()
+        PetPrices.init()
     }
 }

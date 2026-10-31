@@ -29,6 +29,7 @@ import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
 import tech.thatgravyboat.skyblockapi.api.events.level.BlockChangeEvent
 import tech.thatgravyboat.skyblockapi.api.events.level.RightClickBlockEvent
 import tech.thatgravyboat.skyblockapi.api.events.screen.ContainerCloseEvent
+import tech.thatgravyboat.skyblockapi.api.events.screen.ContainerInitializedEvent
 import tech.thatgravyboat.skyblockapi.api.events.screen.InventoryChangeEvent
 import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
 import tech.thatgravyboat.skyblockapi.api.location.SkyBlockIsland
@@ -115,6 +116,18 @@ object ChestScanner {
         if (!isTrackingAllowed() || first == null) return
         if (!isChestTitle(event.titleComponent)) return
         trackedSlots = event.inventory
+        trackedTitle = event.title
+    }
+
+    /**
+     * Fires once the container's contents are fully received — also for an *empty* chest, where
+     * no slot ever changes. Without it, an emptied chest would keep its old items in the index.
+     */
+    @Subscription
+    fun onContainerInitialized(event: ContainerInitializedEvent) {
+        if (!isTrackingAllowed() || first == null) return
+        if (!isChestTitle(event.titleComponent)) return
+        trackedSlots = event.screen.menu.slots
         trackedTitle = event.title
     }
 

@@ -8,6 +8,7 @@ import com.chestmaster.scanner.ChestScanner
 import com.chestmaster.util.ItemUtils
 import com.chestmaster.util.WorldUtils
 import com.chestmaster.valuation.ItemValuator
+import com.mojang.blaze3d.platform.InputConstants
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.components.AbstractWidget
@@ -18,7 +19,10 @@ import net.minecraft.client.input.CharacterEvent
 import net.minecraft.client.input.KeyEvent
 import net.minecraft.client.input.MouseButtonEvent
 import net.minecraft.core.BlockPos
+import net.minecraft.locale.Language
 import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.FormattedText
+import net.minecraft.util.FormattedCharSequence
 import net.minecraft.world.item.ItemStack
 import java.util.Locale
 import kotlin.math.max
@@ -55,7 +59,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         ALL("All"),
         BAZAAR("Bazaar"),
         AUCTION("Auction"),
-        UNKNOWN("Unknown");
+        UNKNOWN("No price");
 
         fun next(): ItemSourceFilter {
             val values = entries
@@ -114,6 +118,8 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
     private val valuationCache = HashMap<String, ItemValuator.Valuation>()
     private var lastValuationRetryMs = 0L
     private val displayLabelCache = LinkedHashMap<String, String>()
+    // Item names with Hypixel's own colours ("[Lvl 100]" grey, stars gold/pink…).
+    private val styledNameCache = LinkedHashMap<String, Component>()
     private val itemNameColorCache = LinkedHashMap<String, Int>()
     private var lastMarketSignature = Long.MIN_VALUE
     private var selectedRecord: ItemRecord? = null
@@ -222,6 +228,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         val refreshButton = createStyledButton(centerX + 136, 34, 74, 20, "Refresh") {
             valuationCache.clear()
             displayLabelCache.clear()
+            styledNameCache.clear()
             itemNameColorCache.clear()
             refreshItems(searchField?.value ?: "")
         }
@@ -233,6 +240,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
             updateModeButtonLabel()
             valuationCache.clear()
             displayLabelCache.clear()
+            styledNameCache.clear()
             itemNameColorCache.clear()
             applySortAndRecalculate()
         }
@@ -323,6 +331,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
             val serverKey = WorldUtils.getCurrentServerKey()
             sourceItems = ChestMasterMod.db.searchItems(query, serverKey)
             displayLabelCache.clear()
+            styledNameCache.clear()
             itemNameColorCache.clear()
             scrollOffset = 0
             applySortAndRecalculate()
@@ -435,6 +444,26 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
             val enchant = ItemValuator.bookEnchantLabel(record.itemNbt) ?: return@getOrPut baseName
             "Enchanted Book ($enchant)"
         }
+    }
+
+    /**
+     * The item's name as Hypixel formats it. Generic enchanted books keep the derived
+     * "Enchanted Book (X)" label; unstyled parts fall back to the rarity colour when drawn.
+     */
+    private fun getStyledName(record: ItemRecord): Component {
+        return styledNameCache.getOrPut(recordKey(record)) {
+            val label = getDisplayLabel(record)
+            if (label != record.displayName) return@getOrPut Component.literal(label)
+            val stack = ItemUtils.deserializeItemStack(record.baseItemId.ifBlank { record.itemId }, record.itemNbt)
+            stack.hoverName.takeIf { !stack.isEmpty && it.string == label } ?: Component.literal(label)
+        }
+    }
+
+    /** Like [ellipsize], but keeps the component's colours. */
+    private fun ellipsizeStyled(text: Component, maxWidth: Int): FormattedCharSequence {
+        if (font.width(text) <= maxWidth) return text.visualOrderText
+        val cut = font.substrByWidth(text, max(0, maxWidth - font.width("...")))
+        return Language.getInstance().getVisualOrder(FormattedText.composite(cut, FormattedText.of("...")))
     }
 
     private fun getItemNameColor(record: ItemRecord): Int {
@@ -709,7 +738,9 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         if (signature != lastMarketSignature) {
             lastMarketSignature = signature
             valuationCache.clear()
-            refreshItems(searchField?.value ?: "")
+            // Only prices changed: re-evaluate and re-sort in place. refreshItems() would re-query
+            // the DB and jump the list back to the top every time new prices arrive.
+            applySortAndRecalculate()
         }
 
         guiGraphics.fillGradient(0, 0, width, height, 0xB40A0F17.toInt(), 0xE0141D2B.toInt())
@@ -803,8 +834,8 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
                 val availableNameWidth = max(40, totalX - nameX - 8)
                 val itemNameColor = getItemNameColor(record)
 
-                val itemLabel = ellipsize("${getDisplayLabel(record)} x${record.count}", availableNameWidth)
-                guiGraphics.text(font, itemLabel, nameX, rowTop + 5, itemNameColor, false)
+                val itemLabel = getStyledName(record).copy().append(Component.literal(" x${record.count}").withColor(itemNameColor and 0xFFFFFF))
+                guiGraphics.text(font, ellipsizeStyled(itemLabel, availableNameWidth), nameX, rowTop + 5, itemNameColor, false)
                 guiGraphics.text(font, totalLabel, totalX, rowTop + 5, 0xFFE5EEFF.toInt(), false)
 
                 if (hasPrice) {
@@ -921,7 +952,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
         x += drawPill(g, x, y, "Bazaar ${sourceStats.bazaar}", sourceColor(ItemValuator.PriceSource.BAZAAR)) + 4
         x += drawPill(g, x, y, "AH ${sourceStats.auction}", sourceColor(ItemValuator.PriceSource.AUCTION)) + 4
         x += drawPill(g, x, y, "NPC ${sourceStats.npc}", sourceColor(ItemValuator.PriceSource.NPC)) + 4
-        if (x + 50 < right) drawPill(g, x, y, "? ${sourceStats.unknown}", sourceColor(ItemValuator.PriceSource.UNKNOWN))
+        if (x + 60 < right) drawPill(g, x, y, "No price ${sourceStats.unknown}", sourceColor(ItemValuator.PriceSource.UNKNOWN))
         y += 16
         g.fill(left, y, right, y + 1, 0x55648CB6)
         y += 6
@@ -965,7 +996,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
 
         val textX = left + 48
         val textWidth = max(40, right - textX - 4)
-        g.text(font, ellipsize(selectedItemName ?: "", textWidth), textX, cardTop + 6, selectedItemNameColor, true)
+        g.text(font, ellipsizeStyled(getStyledName(record), textWidth), textX, cardTop + 6, selectedItemNameColor, true)
         var chipX = textX
         chipX += drawPill(g, chipX, cardTop + 18, selectedSource.label, sourceColor(selectedSource)) + 4
         if (record.count > 1) drawPill(g, chipX, cardTop + 18, "x${record.count}", 0xFF6B8FB5.toInt())
@@ -1006,18 +1037,23 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
                 val shownParts = if (group.parts.size == 1 && group.parts[0].label.equals(group.label, ignoreCase = true)) {
                     emptyList()
                 } else {
-                    group.parts.take(4)
+                    group.parts
                 }
                 for (part in shownParts) {
                     val partValue = ItemValuator.formatPrice(part.value)
-                    g.text(font, "•", left + 8, y, 0xFF5E7290.toInt(), false)
-                    g.text(font, ellipsize(part.label, innerWidth - font.width(partValue) - 22), left + 15, y, 0xFFB8C8DD.toInt(), false)
-                    drawRightAligned(g, partValue, right, y, 0xFF9FB2CC.toInt())
-                    y += 10
-                }
-                if (group.parts.size > shownParts.size && shownParts.isNotEmpty()) {
-                    g.text(font, "+${group.parts.size - shownParts.size} more", left + 15, y, 0xFF6F84A3.toInt(), false)
-                    y += 10
+                    val icon = part.icon?.takeIf { !it.isEmpty }
+                    val rowHeight = if (icon != null) 12 else 10
+                    val textY = y + (rowHeight - 8) / 2
+                    val textX = if (icon != null) {
+                        drawScaledItem(g, icon, left + 8, y, 0.75f)
+                        left + 22
+                    } else {
+                        g.text(font, "•", left + 8, textY, 0xFF5E7290.toInt(), false)
+                        left + 15
+                    }
+                    g.text(font, ellipsize(part.label, right - textX - font.width(partValue) - 6), textX, textY, 0xFFB8C8DD.toInt(), false)
+                    drawRightAligned(g, partValue, right, textY, 0xFF9FB2CC.toInt())
+                    y += rowHeight
                 }
                 y += 3
             }
@@ -1188,7 +1224,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
 
     override fun mouseClicked(mouseButtonEvent: MouseButtonEvent, bl: Boolean): Boolean {
         if (super.mouseClicked(mouseButtonEvent, bl)) return true
-        if (mouseButtonEvent.button() != 0) return false
+        if (mouseButtonEvent.button() != InputConstants.MOUSE_BUTTON_LEFT) return false
 
         val mouseX = mouseButtonEvent.x()
         val mouseY = mouseButtonEvent.y()
@@ -1237,7 +1273,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
     }
 
     override fun mouseDragged(mouseButtonEvent: MouseButtonEvent, dragX: Double, dragY: Double): Boolean {
-        if (isDraggingListScrollbar && mouseButtonEvent.button() == 0) {
+        if (isDraggingListScrollbar && mouseButtonEvent.button() == InputConstants.MOUSE_BUTTON_LEFT) {
             applyScrollbarDrag(mouseButtonEvent.y().toInt(), computeLayout())
             return true
         }
@@ -1245,7 +1281,7 @@ class ChestMasterScreen(private val initialQuery: String = "") : Screen(Componen
     }
 
     override fun mouseReleased(mouseButtonEvent: MouseButtonEvent): Boolean {
-        if (mouseButtonEvent.button() == 0 && isDraggingListScrollbar) {
+        if (mouseButtonEvent.button() == InputConstants.MOUSE_BUTTON_LEFT && isDraggingListScrollbar) {
             isDraggingListScrollbar = false
             return true
         }

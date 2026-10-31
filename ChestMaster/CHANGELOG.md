@@ -5,6 +5,37 @@
 
 ---
 
+## [1.3.1] — 2026-11-01
+
+**Supported Minecraft versions / Поддерживаемые версии:** `26.1` – `26.1.2` · `26.2` · `26.3`
+
+### 🆕 Added / Добавлено
+
+| Feature | Description |
+|---|---|
+| **Minecraft 26.3** | New build for MC 26.3 (bundles SkyBlockAPI 4.3) |
+| **Shard prices** | Attribute shards are priced by their attribute via the Bazaar, including shards Hypixel renamed (bundled mapping table, refreshed in the background) |
+| **Level-aware pet prices** | Pets are priced by type, rarity **and level** (lowest BIN for that level range), plus held item and skin |
+| **Auction data fallback** | If the default auction-price source is unreachable, a mirror is used automatically |
+| **Full value breakdown** | Every part is listed (no more "+N more"), with item icons for scrolls, gemstones, pet items, etc. |
+| **"Value skins & dyes" option** | Mod Menu toggle to exclude applied dyes and armor/helmet/pet skins from item values |
+
+### 🐛 Fixed / Исправлено
+
+| Bug | Description |
+|---|---|
+| **Dungeon chests in the index** | Only chests on your Private Island are tracked; stray entries saved by older versions (e.g. dungeon secret chests) are removed once on first launch |
+| **Chest markers outside the island** | Markers are drawn only on your Private Island |
+| **Emptied chests kept old items** | Opening a chest that is now empty clears its entry |
+| **Search results capped at 2000 rows** | All indexed items are shown |
+| **Duplicated unique items** | An item with the same UUID seen in several chests is listed once (newest location) |
+| **GUI jumped to the top** | The list no longer resets its scroll position whenever prices update |
+| **Champion, Toxophilite, Compact… not valued** | Enchantments that level up by use are valued at the level-I book they come from |
+| **Enchanted books shown as "No price"** | Books now count under the Bazaar source; names keep Hypixel's colours (pet level, stars) |
+| **Clicks ignored on 26.3** | Minecraft 26.3 renumbered mouse buttons; the item list is clickable again |
+
+---
+
 ## [1.3.0] — 2026-10-10
 
 **Supported Minecraft versions / Поддерживаемые версии:** `26.1` – `26.1.2` · `26.2`

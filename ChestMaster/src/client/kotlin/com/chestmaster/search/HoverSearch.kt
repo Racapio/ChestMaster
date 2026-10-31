@@ -5,11 +5,11 @@
  */
 package com.chestmaster.search
 
+import com.chestmaster.compat.VersionHelper
 import com.chestmaster.mixin.AbstractContainerScreenAccessor
 import net.minecraft.client.KeyMapping
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
-import net.minecraft.client.input.KeyEvent
 import tech.thatgravyboat.skyblockapi.api.SkyBlockAPI
 import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
 import tech.thatgravyboat.skyblockapi.api.events.screen.ScreenKeyReleasedEvent
@@ -37,7 +37,7 @@ object HoverSearch {
     @Subscription
     fun onKeyReleased(event: ScreenKeyReleasedEvent) {
         val key = keyMapping ?: return
-        if (!key.matches(KeyEvent(event.key, event.scanCode, event.modifiers))) return
+        if (!key.matches(VersionHelper.keyEventOf(event))) return
         val screen = event.screen as? AbstractContainerScreen<*> ?: return
 
         val stack = (screen as AbstractContainerScreenAccessor).`chestmaster$getHoveredSlot`()?.item ?: return

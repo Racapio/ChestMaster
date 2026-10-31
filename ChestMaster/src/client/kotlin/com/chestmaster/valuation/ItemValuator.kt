@@ -3,7 +3,10 @@ package com.chestmaster.valuation
 import com.chestmaster.ChestMasterMod
 import com.chestmaster.database.ItemRecord
 import com.chestmaster.util.ItemUtils
+import net.minecraft.core.component.DataComponents
+import net.minecraft.nbt.CompoundTag
 import net.minecraft.world.item.ItemStack
+import net.minecraft.world.item.Items
 import tech.thatgravyboat.skyblockapi.api.item.calculator.CalculationEntry
 import tech.thatgravyboat.skyblockapi.api.item.calculator.CostEntries
 import tech.thatgravyboat.skyblockapi.api.item.calculator.GroupedEntry
@@ -31,7 +34,7 @@ object ItemValuator {
         BAZAAR("Bazaar"),
         AUCTION("Auction"),
         NPC("NPC"),
-        UNKNOWN("Unknown")
+        UNKNOWN("No price")
     }
 
     enum class PriceMode(val label: String) {
@@ -94,7 +97,9 @@ object ItemValuator {
         val lbin = runCatching { LowestBinAPI.items }.getOrNull()
         return (System.identityHashCode(bazaar).toLong() shl 32) xor
             System.identityHashCode(lbin).toLong() xor
-            (bazaarSize().toLong() shl 16) xor lowestBinSize().toLong()
+            (bazaarSize().toLong() shl 16) xor lowestBinSize().toLong() xor
+            (PetPrices.version shl 40) xor (ShardIds.version shl 48) xor
+            (if (includeSkinsAndDyes()) 0L else 1L shl 62)
     }
 
     fun evaluate(record: ItemRecord): Valuation {
@@ -111,6 +116,23 @@ object ItemValuator {
             ?: ItemUtils.normalizeSkyblockId(fallbackId).orEmpty()
         // The *market* id: e.g. ENCHANTMENT_ULTIMATE_SUNSET_1 for a book, the AH key for a pet.
         val marketId = runCatching { stack.getApiId() }.getOrNull()?.takeIf { it.isNotBlank() } ?: skyblockId
+        val customData = stack.get(DataComponents.CUSTOM_DATA)?.copyTag()
+
+        // Pets: priced by type + rarity + level (SkyBlockAPI ignores the level).
+        if (skyblockId == "PET" || customData?.contains("petInfo") == true) {
+            evaluatePet(stack, customData)?.let { return it }
+        }
+
+        // Attribute shards: resolved by their attribute (names were renamed, Bazaar ids weren't).
+        if (skyblockId == "ATTRIBUTE_SHARD" || marketId == "ATTRIBUTE_SHARD") {
+            ShardIds.resolve(customData, stack.hoverName.string)?.let { shardId ->
+                bazaarUnitPrice(shardId)?.let { price ->
+                    val group = Group("Bazaar (${currentMode.label})", price, listOf(Part(shardId.removePrefix("SHARD_").let(::toTitleCase) + " Shard", price, stack.copy())))
+                    return Valuation(shardId, PriceSource.BAZAAR, price, listOf(group))
+                }
+            }
+        }
+
         val source = sourceOf(marketId).takeIf { it != PriceSource.UNKNOWN } ?: sourceOf(skyblockId)
 
         // Plain Bazaar items (incl. single enchanted books): honour Sell Offer / Buy Order.
@@ -127,7 +149,9 @@ object ItemValuator {
         if (result != null && result.price > 0L) {
             // SkyBlockAPI prices Bazaar components at the instant-sell price; re-price them by the
             // selected mode so "Sell Offer" matches what other value tooltips show.
-            val groups = result.entryTree
+            val includeCosmetics = includeSkinsAndDyes()
+            val entries = result.entryTree.filter { includeCosmetics || it.source.name !in cosmeticSources }
+            val calculated = entries
                 .map { group ->
                     Group(
                         label = groupLabel(group.source.name),
@@ -138,10 +162,15 @@ object ItemValuator {
                             .sortedByDescending { it.value }
                     )
                 }
-                .filter { it.value > 0.0 }
-                .sortedByDescending { it.value }
-            val total = result.price + result.entryTree.sumOf { bazaarDelta(it) }
-            return Valuation(skyblockId, source, total.coerceAtLeast(0.0), groups)
+            val (groups, usageValue) = withUsageEnchants(calculated, customData, entries)
+            val sortedGroups = groups.filter { it.value > 0.0 }.sortedByDescending { it.value }
+            val excluded = if (includeCosmetics) 0.0 else
+                result.entryTree.filter { it.source.name in cosmeticSources }.sumOf { it.price.toDouble() }
+            val total = result.price - excluded + entries.sumOf { bazaarDelta(it) } + usageValue
+            // Enchanted books etc. have no market id of their own: take the source of their
+            // most valuable component (e.g. the Bazaar book behind "Ultimate Sunset I").
+            val resolvedSource = if (source != PriceSource.UNKNOWN) source else dominantSource(entries)
+            if (total > 0.0) return Valuation(skyblockId, resolvedSource, total, sortedGroups)
         }
 
         val npc = runCatching { ItemData.getNpcSellPrice(skyblockId) }.getOrNull()
@@ -152,6 +181,131 @@ object ItemValuator {
 
         return Valuation(skyblockId, source, 0.0, emptyList())
     }
+
+    private val petLevelRegex = Regex("""\[Lvl (\d+)]""")
+
+    /**
+     * Pet value = lowest BIN of the same pet type, rarity and level range (Coflnet), plus the held
+     * pet item and the applied skin at their market prices. Returns null when the pet can't be
+     * identified; while its price is still being fetched, SkyBlockAPI's tier-only value is used.
+     */
+    private fun evaluatePet(stack: ItemStack, customData: CompoundTag?): Valuation? {
+        val petInfo = customData?.getString("petInfo")?.orElse(null) ?: return null
+        val info = runCatching { com.google.gson.JsonParser.parseString(petInfo).asJsonObject }.getOrNull() ?: return null
+        val type = info.get("type")?.asString?.uppercase(Locale.ROOT) ?: return null
+        val tier = info.get("tier")?.asString?.uppercase(Locale.ROOT) ?: return null
+        val name = formattingRegex.replace(stack.hoverName.string, "")
+        val level = petLevelRegex.find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+
+        val quote = PetPrices.quote(type, tier, level)
+        if (quote == null) {
+            // Price not fetched yet: show SkyBlockAPI's tier-only estimate meanwhile, if any.
+            return null
+        }
+
+        val groups = ArrayList<Group>()
+        val petName = "${toTitleCase(type)} ${toTitleCase(tier)} (${quote.label})"
+        groups += Group("Pet (Lvl $level)", quote.price, listOf(Part(petName, quote.price, stack.copy())))
+
+        info.get("heldItem")?.takeIf { !it.isJsonNull }?.asString?.let { heldItem ->
+            marketPrice(heldItem)?.let {
+                val icon = repoIcon(heldItem)
+                val label = icon?.let { stack -> displayName(heldItem, stack) } ?: toTitleCase(heldItem.removePrefix("PET_ITEM_"))
+                groups += Group("Pet item", it, listOf(Part(label, it, icon)))
+            }
+        }
+        info.get("skin")?.takeIf { !it.isJsonNull && includeSkinsAndDyes() }?.asString?.let { skin ->
+            marketPrice("PET_SKIN_$skin")?.let { groups += Group("Skin", it, listOf(Part(toTitleCase(skin) + " Skin", it, repoIcon("PET_SKIN_$skin")))) }
+        }
+
+        val total = groups.sumOf { it.value }
+        return Valuation("PET_$type", PriceSource.AUCTION, total, groups.sortedByDescending { it.value })
+    }
+
+    /**
+     * Enchantments that level up by use (Champion, Toxophilite, Compact…). Only the level-I book
+     * exists on the Bazaar, so SkyBlockAPI finds no price for e.g. "Champion X" and skips it.
+     * They are valued at the level-I book they were applied from.
+     */
+    private val usageEnchants = setOf("champion", "toxophilite", "compact", "cultivating", "expertise", "hecatomb")
+
+    private fun withUsageEnchants(
+        groups: List<Group>,
+        customData: CompoundTag?,
+        entries: List<CalculationEntry>
+    ): Pair<List<Group>, Double> {
+        val enchants = customData?.getCompound("enchantments")?.orElse(null) ?: return groups to 0.0
+        val pricedIds = HashSet<String>().also { ids -> entries.forEach { collectItemIds(it, ids) } }
+        val extra = enchants.keySet()
+            .filter { it in usageEnchants }
+            .mapNotNull { key ->
+                val prefix = "ENCHANTMENT_${key.uppercase(Locale.ROOT)}_"
+                if (pricedIds.any { it.startsWith(prefix) }) return@mapNotNull null
+                val price = bazaarUnitPrice("${prefix}1") ?: return@mapNotNull null
+                val level = enchants.getInt(key).orElse(1)
+                Part("${toTitleCase(key)} ${toRoman(level)}", price, ItemStack(Items.ENCHANTED_BOOK))
+            }
+        if (extra.isEmpty()) return groups to 0.0
+
+        val added = extra.sumOf { it.value }
+        val existing = groups.firstOrNull { it.label == "Enchantments" }
+        val merged = if (existing != null) {
+            groups.map {
+                if (it !== existing) it
+                else Group(it.label, it.value + added, (it.parts + extra).sortedByDescending { p -> p.value })
+            }
+        } else {
+            groups + Group("Enchantments", added, extra.sortedByDescending { it.value })
+        }
+        return merged to added
+    }
+
+    private fun dominantSource(entries: List<CalculationEntry>): PriceSource {
+        var bestId: String? = null
+        var bestPrice = 0L
+        fun visit(entry: CalculationEntry) {
+            when (entry) {
+                is ItemLikeEntry -> if (entry.price > bestPrice) { bestPrice = entry.price; bestId = entry.itemId }
+                is GroupedEntry -> entry.entries.forEach(::visit)
+                else -> Unit
+            }
+        }
+        entries.forEach(::visit)
+        return bestId?.let { sourceOf(it) } ?: PriceSource.UNKNOWN
+    }
+
+    private fun collectItemIds(entry: CalculationEntry, into: MutableSet<String>) {
+        when (entry) {
+            is ItemLikeEntry -> if (entry.price > 0L) into += entry.itemId
+            is GroupedEntry -> entry.entries.forEach { collectItemIds(it, into) }
+            else -> Unit
+        }
+    }
+
+    /** Calculator groups that are purely cosmetic and can be excluded in the config. */
+    private val cosmeticSources = setOf("APPLIED_DYE", "HELMET_SKIN")
+
+    private fun includeSkinsAndDyes(): Boolean =
+        runCatching { ChestMasterMod.configManager.config.valueSkinsAndDyes }.getOrDefault(true)
+
+    /** Item icon from SkyBlockAPI's item repo, or null when the repo doesn't know the id. */
+    private fun repoIcon(id: String): ItemStack? =
+        iconOf(id, runCatching { ItemEntry(id, 0L, 1).itemStack }.getOrNull())
+
+    /**
+     * Icon for a breakdown row. Enchantments aren't items in the repo (SkyBlockAPI hands back a
+     * barrier placeholder), so they get an enchanted book; other unknown ids get no icon.
+     */
+    private fun iconOf(itemId: String, stack: ItemStack?): ItemStack? {
+        if (itemId.startsWith("ENCHANTMENT_")) return ItemStack(Items.ENCHANTED_BOOK)
+        return stack?.takeIf {
+            !it.isEmpty && !it.`is`(Items.BARRIER) && !it.hoverName.string.startsWith("Could not find", ignoreCase = true)
+        }
+    }
+
+    /** Bazaar price (by mode) or lowest BIN for a market id. */
+    private fun marketPrice(id: String): Double? =
+        bazaarUnitPrice(id) ?: runCatching { LowestBinAPI.getLowestPrice(id) }.getOrNull()?.toDouble()?.takeIf { it > 0.0 }
 
     fun sourceOf(marketId: String): PriceSource {
         if (marketId.isEmpty()) return PriceSource.UNKNOWN
@@ -211,9 +365,9 @@ object ItemValuator {
     private fun toPart(entry: CalculationEntry): Part {
         val value = entry.price + bazaarDelta(entry)
         return when (entry) {
-            is ItemWithLimitEntry -> Part("${entry.amount}/${entry.limit} ${displayName(entry.itemId, entry.itemStack)}", value, entry.itemStack)
-            is ItemEntry -> Part(withAmount(entry.amount, displayName(entry.itemId, entry.itemStack)), value, entry.itemStack)
-            is ItemLikeEntry -> Part(displayName(entry.itemId, entry.itemStack), value, entry.itemStack)
+            is ItemWithLimitEntry -> Part("${entry.amount}/${entry.limit} ${displayName(entry.itemId, entry.itemStack)}", value, iconOf(entry.itemId, entry.itemStack))
+            is ItemEntry -> Part(withAmount(entry.amount, displayName(entry.itemId, entry.itemStack)), value, iconOf(entry.itemId, entry.itemStack))
+            is ItemLikeEntry -> Part(displayName(entry.itemId, entry.itemStack), value, iconOf(entry.itemId, entry.itemStack))
             is ReforgeEntry -> Part("Reforge: ${toTitleCase(entry.reforge)}", value, null)
             is ItemStarEntry -> Part("${entry.stars.size} star(s)", value, null)
             is CostEntries -> Part("Unlock cost", value, null)

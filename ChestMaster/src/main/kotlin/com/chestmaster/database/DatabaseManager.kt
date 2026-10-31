@@ -51,6 +51,7 @@ class DatabaseManager {
             createTables()
             migrateSchema()
             cleanupBlockedContainerRows()
+            runOneTimeMigrations()
             if (ChestMasterMod.isVerboseLogging()) {
                 ChestMasterMod.LOGGER.info("Database initialized at $targetPath")
             }
@@ -130,6 +131,43 @@ class DatabaseManager {
      * Purges rows saved from non-storage containers (Hypixel menus, reward chests,
      * ender chest pages) by mods versions that lacked the title block-list.
      */
+    /** Release date of 1.3.0, the first version that tracks chests only on the Private Island. */
+    private val trackerV2CutoffMs = 1791590400000L // 2026-10-10T00:00Z
+
+    /** One-time data fixes, applied once per database (versioned with SQLite's user_version). */
+    private fun runOneTimeMigrations() {
+        val conn = connection ?: return
+        val version = conn.createStatement().use { st -> st.executeQuery("PRAGMA user_version").use { if (it.next()) it.getInt(1) else 0 } }
+
+        if (version < 1) {
+            // Versions before 1.3.0 indexed any vanilla-named chest anywhere, including dungeon
+            // secret chests — each holds exactly one item (Healing potion, Trap, Decoy, …) — and they
+            // showed up in totals and as markers far outside the island. Remove every old-scanner
+            // chest holding a single item; a real storage chest that matches is simply re-indexed
+            // the next time it is opened on the island.
+            val removed = runCatching {
+                conn.prepareStatement(
+                    """
+                    DELETE FROM items WHERE (chestX, chestY, chestZ, serverKey) IN (
+                        SELECT chestX, chestY, chestZ, serverKey FROM items
+                        GROUP BY chestX, chestY, chestZ, serverKey
+                        HAVING COUNT(*) = 1 AND MAX(lastSeen) < ?
+                    )
+                    """.trimIndent()
+                ).use { st ->
+                    st.setLong(1, trackerV2CutoffMs)
+                    st.executeUpdate()
+                }
+            }.onFailure { ChestMasterMod.LOGGER.warn("Dungeon-chest cleanup failed: ${it.message}") }.getOrNull()
+            if (removed != null) {
+                if (removed > 0) {
+                    ChestMasterMod.LOGGER.info("[ChestMaster] Removed $removed item(s) from old-version dungeon secret chests")
+                }
+                conn.createStatement().use { it.execute("PRAGMA user_version = 1") }
+            }
+        }
+    }
+
     private fun cleanupBlockedContainerRows() {
         val conn = connection ?: return
         var total = 0
@@ -310,7 +348,6 @@ class DatabaseManager {
             WHERE (displayName LIKE ? OR itemId LIKE ? OR baseItemId LIKE ? OR label LIKE ?)
             $serverFilter
             ORDER BY displayName
-            LIMIT 2000
         """.trimIndent()
 
         connection?.prepareStatement(sql)?.use { pstmt ->
@@ -341,7 +378,31 @@ class DatabaseManager {
                 }
             }
         }
-        return stackSimilarItems(results)
+        return stackSimilarItems(dedupeByUuid(results))
+    }
+
+    private val uuidRegex = Regex("""uuid:"([0-9a-fA-F-]{36})"""")
+
+    /**
+     * Every SkyBlock item carries a unique uuid. The pre-1.3.0 scanner guessed chest positions from
+     * the crosshair and sometimes saved one chest under two coordinates, so the same physical item
+     * appears twice. Keep only the most recently seen copy of each uuid (items without one — plain
+     * stackables — are kept as they are).
+     */
+    private fun dedupeByUuid(records: List<ItemRecord>): List<ItemRecord> {
+        val newestByUuid = HashMap<String, ItemRecord>()
+        val result = ArrayList<ItemRecord>(records.size)
+        for (record in records) {
+            val uuid = uuidRegex.find(record.itemNbt)?.groupValues?.get(1)
+            if (uuid == null) {
+                result += record
+                continue
+            }
+            val existing = newestByUuid[uuid]
+            if (existing == null || record.lastSeen > existing.lastSeen) newestByUuid[uuid] = record
+        }
+        result += newestByUuid.values
+        return result
     }
 
     /** Distinct SkyBlock item ids stored in the DB — used to fetch missing market prices. */
@@ -452,12 +513,13 @@ class DatabaseManager {
 
         val serverFilter = if (!serverKey.isNullOrBlank()) "AND (serverKey = ? OR serverKey = '')" else ""
         val sql = """
-            SELECT itemId, baseItemId, displayName, itemNbt, count, chestX, chestY, chestZ, label, serverKey
+            SELECT itemId, baseItemId, displayName, itemNbt, count, chestX, chestY, chestZ, label, serverKey, lastSeen
             FROM items
             WHERE (itemId = ? OR baseItemId = ? OR itemId = ? OR baseItemId = ?)
             $serverFilter
         """.trimIndent()
 
+        val matching = ArrayList<ItemRecord>()
         connection?.prepareStatement(sql)?.use { pstmt ->
             pstmt.setString(1, normalizedItemId)
             pstmt.setString(2, normalizedItemId)
@@ -477,21 +539,20 @@ class DatabaseManager {
                         chestY = rs.getInt("chestY"),
                         chestZ = rs.getInt("chestZ"),
                         label = rs.getString("label") ?: "",
-                        serverKey = rs.getString("serverKey") ?: ""
+                        serverKey = rs.getString("serverKey") ?: "",
+                        lastSeen = rs.getLong("lastSeen")
                     )
 
                     if (buildStackingKey(rowRecord) != targetKey) continue
-
-                    val x = rowRecord.chestX
-                    val y = rowRecord.chestY
-                    val z = rowRecord.chestZ
-
-                    // Ignore legacy rows saved before chest position detection existed.
-                    if (x == 0 && y == 0 && z == 0) continue
-
-                    results.add(ChestLocation(x, y, z, rowRecord.label, rowRecord.serverKey))
+                    matching += rowRecord
                 }
             }
+        }
+
+        for (rowRecord in dedupeByUuid(matching)) {
+            // Ignore legacy rows saved before chest position detection existed.
+            if (rowRecord.chestX == 0 && rowRecord.chestY == 0 && rowRecord.chestZ == 0) continue
+            results.add(ChestLocation(rowRecord.chestX, rowRecord.chestY, rowRecord.chestZ, rowRecord.label, rowRecord.serverKey))
         }
 
         return results.toList()

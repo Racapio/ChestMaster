@@ -4,8 +4,12 @@
   "version": "${version}",
   "name": "ChestMaster",
   "description": "Client-side chest indexing and item valuation for SkyBlock (no automation).",
-  "authors": ["Manus"],
-  "contact": {},
+  "authors": ["Racapio"],
+  "contact": {
+    "homepage": "https://modrinth.com/mod/chestmaster",
+    "sources": "https://github.com/Racapio/ChestMaster",
+    "issues": "https://github.com/Racapio/ChestMaster/issues"
+  },
   "license": "MIT",
   "icon": "assets/chestmaster/icon.png",
   "environment": "client",

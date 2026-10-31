@@ -55,31 +55,40 @@ object HighlightGeometry {
         buffer: VertexConsumer,
         x1: Float, y1: Float, z1: Float,
         x2: Float, y2: Float, z2: Float,
-        argb: Int
+        argb: Int,
+        withUv: Boolean = false
     ) {
         // Bottom / top
-        quad(pose, buffer, argb, x1, y1, z1, x2, y1, z1, x2, y1, z2, x1, y1, z2)
-        quad(pose, buffer, argb, x1, y2, z1, x1, y2, z2, x2, y2, z2, x2, y2, z1)
+        quad(pose, buffer, argb, withUv, x1, y1, z1, x2, y1, z1, x2, y1, z2, x1, y1, z2)
+        quad(pose, buffer, argb, withUv, x1, y2, z1, x1, y2, z2, x2, y2, z2, x2, y2, z1)
         // North / south
-        quad(pose, buffer, argb, x1, y1, z1, x1, y2, z1, x2, y2, z1, x2, y1, z1)
-        quad(pose, buffer, argb, x1, y1, z2, x2, y1, z2, x2, y2, z2, x1, y2, z2)
+        quad(pose, buffer, argb, withUv, x1, y1, z1, x1, y2, z1, x2, y2, z1, x2, y1, z1)
+        quad(pose, buffer, argb, withUv, x1, y1, z2, x2, y1, z2, x2, y2, z2, x1, y2, z2)
         // West / east
-        quad(pose, buffer, argb, x1, y1, z1, x1, y1, z2, x1, y2, z2, x1, y2, z1)
-        quad(pose, buffer, argb, x2, y1, z1, x2, y2, z1, x2, y2, z2, x2, y1, z2)
+        quad(pose, buffer, argb, withUv, x1, y1, z1, x1, y1, z2, x1, y2, z2, x1, y2, z1)
+        quad(pose, buffer, argb, withUv, x2, y1, z1, x2, y2, z1, x2, y2, z2, x2, y1, z2)
     }
 
     private fun quad(
         pose: PoseStack.Pose,
         buffer: VertexConsumer,
         argb: Int,
+        withUv: Boolean,
         ax: Float, ay: Float, az: Float,
         bx: Float, by: Float, bz: Float,
         cx: Float, cy: Float, cz: Float,
         dx: Float, dy: Float, dz: Float
     ) {
-        buffer.addVertex(pose, ax, ay, az).setColor(argb).setLight(FULL_BRIGHT)
-        buffer.addVertex(pose, bx, by, bz).setColor(argb).setLight(FULL_BRIGHT)
-        buffer.addVertex(pose, cx, cy, cz).setColor(argb).setLight(FULL_BRIGHT)
-        buffer.addVertex(pose, dx, dy, dz).setColor(argb).setLight(FULL_BRIGHT)
+        vertex(pose, buffer, argb, withUv, ax, ay, az)
+        vertex(pose, buffer, argb, withUv, bx, by, bz)
+        vertex(pose, buffer, argb, withUv, cx, cy, cz)
+        vertex(pose, buffer, argb, withUv, dx, dy, dz)
+    }
+
+    private fun vertex(pose: PoseStack.Pose, buffer: VertexConsumer, argb: Int, withUv: Boolean, x: Float, y: Float, z: Float) {
+        val v = buffer.addVertex(pose, x, y, z).setColor(argb)
+        // Text pipelines (used for the see-through fill on 26.3+) also expect texture coordinates.
+        if (withUv) v.setUv(0.5f, 0.5f)
+        v.setLight(FULL_BRIGHT)
     }
 }

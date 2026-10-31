@@ -8,6 +8,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
 import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.rendertype.RenderTypes
 import net.minecraft.core.BlockPos
+import tech.thatgravyboat.skyblockapi.api.location.SkyBlockIsland
 
 object ChestLocationHighlighter {
     @Volatile
@@ -23,6 +24,9 @@ object ChestLocationHighlighter {
         LevelRenderEvents.COLLECT_SUBMITS.register { context ->
             val positions = activePositions
             if (positions.isEmpty()) return@register
+            // Stored positions are island coordinates — drawing them in the Hub, a dungeon, etc.
+            // would put markers in the middle of nowhere.
+            if (!SkyBlockIsland.PRIVATE_ISLAND.inIsland()) return@register
 
             val cameraPos = context.levelState().cameraRenderState.pos
             val poseStack = context.poseStack()

@@ -15,6 +15,7 @@ The mod is read-only QoL: no automation, no movement/combat macros, no packet sp
 |---|---|
 | `26.1` – `26.1.2` | Fabric (requires Java 25) |
 | `26.2` | Fabric (requires Java 25) |
+| `26.3` | Fabric (requires Java 25) |
 
 > Older builds for MC `1.21.10` / `1.21.11` are still available in past releases but are no longer maintained.
 
@@ -29,6 +30,7 @@ The mod is read-only QoL: no automation, no movement/combat macros, no packet sp
 |---|---|
 | `26.1` / `26.1.1` / `26.1.2` | `...+mc26.1.2.jar` |
 | `26.2` | `...+mc26.2.jar` |
+| `26.3` | `...+mc26.3.jar` |
 
 ## Commands
 
@@ -81,6 +83,7 @@ cd ChestMaster
 ./gradlew.bat build                      # default profile (26.1.2)
 ./gradlew.bat build -PmcVersion=26.1.2
 ./gradlew.bat build -PmcVersion=26.2
+./gradlew.bat build -PmcVersion=26.3
 ```
 
 Requires Java 25 (Gradle toolchain resolves it automatically).
