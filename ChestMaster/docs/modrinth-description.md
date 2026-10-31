@@ -49,6 +49,8 @@ It only reads container contents that are already visible on your client and sto
 | 26.2 | `chestmaster-mc26.2-*.jar` |
 | 26.3 | `chestmaster-mc26.3-*.jar` |
 
+Found a bug? Discord: **Racap**
+
 ---
 
 ### Русское описание
